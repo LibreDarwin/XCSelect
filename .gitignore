@@ -1,0 +1,11 @@
+.DS_Store
+*.o
+*.a
+*.tmp
+build/
+Build/
+local/
+xcuserdata/
+*.xcworkspace
+__pycache__/
+*.pyc
