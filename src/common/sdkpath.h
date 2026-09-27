@@ -41,6 +41,16 @@ char *xt_find_sdk(const char *devdir, const char *name);
 char *xt_sdk_platform_path(const char *sdkpath);
 
 /**
+ * @func xt_sdk_build_version -- read the build an SDK was cut from
+ * @arg sdkpath - absolute path of the .sdk directory
+ * @return: malloc'd build version, or NULL when there is none
+ *
+ * An SDK does not name its own build, so it is read from the
+ * SystemVersion.plist the SDK ships rather than derived from its version.
+ */
+char *xt_sdk_build_version(const char *sdkpath);
+
+/**
  * @func xt_platform_setting -- read a top-level string from a platform's Info.plist
  * @arg platformpath - absolute path of the .platform directory
  * @arg key - key to read, e.g. "Version"

@@ -38,6 +38,7 @@
 #include <libgen.h>
 #include <limits.h>
 #include <errno.h>
+#include <sysexits.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -58,11 +59,25 @@
 #define XCRUN_DEFAULT_DEVELOPER_DIR "/Library/Developer/CommandLineTools"
 #endif
 
-/* Toolchain configuration struct */
-typedef struct {
-	const char *name;
-	const char *version;
-} toolchain_config;
+/*
+ * Which of the --show-* answers was asked for.
+ *
+ * Only one of them is printed when several are given.  The SDK and
+ * platform ones answer to the order they were asked in rather than to a
+ * fixed one -- "xcrun --show-sdk-version --show-sdk-build-version" prints
+ * the build and the other way round prints the version -- so the one
+ * asked for last is the one kept.  The toolchain path is not one of
+ * them: it is answered only when no SDK or platform answer was asked
+ * for, and otherwise goes unanswered however late it comes.
+ */
+enum show_kind {
+	SHOW_NONE = 256,
+	SHOW_SDK_PATH,
+	SHOW_SDK_VERSION,
+	SHOW_SDK_BUILD_VERSION,
+	SHOW_SDK_PLATFORM_PATH,
+	SHOW_SDK_PLATFORM_VERSION
+};
 
 /* SDK configuration struct */
 typedef struct {
@@ -235,40 +250,44 @@ static void logging_printf(FILE *fp, const char *str, ...)
 
 /**
  * @func usage -- Print helpful information about this program.
+ * @arg status - what to exit with: 0 when the help was all that was asked
+ * for, EX_USAGE when it is the answer to being used wrongly
+ *
+ * The complaint itself, when there is one, is printed by the caller: what
+ * was wrong with the command line is said before the help that follows it.
  */
-static void usage(void)
+static void usage(int status)
 {
 	fprintf(stderr,
 		"Usage: %s [options] <tool name> ... arguments ...\n"
 		"\n"
-		"Find and execute the named command line tool from the active developer directory.\n"
+		"Find and execute the named command line tool from the active developer\n"
+		"directory.\n"
 		"\n"
 		"The active developer directory can be set using `xcode-select`, or via the\n"
-		"DEVELOPER_DIR environment variable.\n"
+		"DEVELOPER_DIR environment variable. See the xcrun and xcode-select manual\n"
+		"pages for more information.\n"
 		"\n"
 		"Options:\n"
-		"  -h, --help                   show this help message and exit\n"
-		"  --version                    show the xcrun version\n"
-		"  -v, --verbose                show verbose logging output\n"
-		"  --sdk <sdk name>             find the tool for the given SDK name\n"
-		"  --toolchain <name>           find the tool for the given toolchain\n"
-		"  -l, --log                    show commands to be executed (with --run)\n"
-		"  -f, --find                   only find and print the tool path\n"
-		"  -r, --run                    find and execute the tool (the default behavior)\n"
-#if 0
-		"  -n, --no-cache               do not use the lookup cache (not implemented yet - does nothing)\n"
-		"  -k, --kill-cache             invalidate all existing cache entries (not implemented yet - does nothing)\n"
-#endif
-		"  --show-sdk-path              show selected SDK install path\n"
-		"  --show-sdk-platform-path     show selected SDK platform path\n"
-		"  --show-sdk-platform-version  show selected SDK platform version\n"
-		"  --show-sdk-version           show selected SDK version\n"
-		"  --show-sdk-target-triple     show selected SDK target triple\n"
-		"  --show-sdk-toolchain-path    show selected SDK toolchain path\n"
-		"  --show-sdk-toolchain-version show selected SDK toolchain version\n\n"
+		"  -h, --help                  show this help message and exit\n"
+		"  --version                   show the xcrun version\n"
+		"  -v, --verbose               show verbose logging output\n"
+		"  --sdk <sdk name>            find the tool for the given SDK name\n"
+		"  --toolchain <name>          find the tool for the given toolchain\n"
+		"  -l, --log                   show commands to be executed (with --run)\n"
+		"  -f, --find                  only find and print the tool path\n"
+		"  -r, --run                   find and execute the tool (the default behavior)\n"
+		"  -n, --no-cache              do not use the lookup cache\n"
+		"  -k, --kill-cache            invalidate all existing cache entries\n"
+		"  --show-sdk-path             show selected SDK install path\n"
+		"  --show-sdk-version          show selected SDK version\n"
+		"  --show-sdk-build-version    show selected SDK build version\n"
+		"  --show-sdk-platform-path    show selected SDK platform path\n"
+		"  --show-sdk-platform-version show selected SDK platform version\n"
+		"  --show-toolchain-path       show selected SDK preferred toolchain path\n"
 		, progname);
 
-	exit(0);
+	exit(status);
 }
 
 /**
@@ -300,28 +319,6 @@ static int validate_directory_path(const char *dir)
 	}
 
 	return retval;
-}
-
-/**
- * @func toolchain_cfg_handler -- handler used to process toolchain info.ini contents
- * @arg user - ini user pointer (see ini.h)
- * @arg section - ini section name (see ini.h)
- * @arg name - ini variable name (see ini.h)
- * @arg value - ini variable value (see ini.h)
- * @return: 1 on success, 0 on failure
- */
-static int toolchain_cfg_handler(void *user, const char *section, const char *name, const char *value)
-{
-	toolchain_config *config = (toolchain_config *)user;
-
-	if (MATCH_INI_STON("TOOLCHAIN", "name"))
-		config->name = strdup(value);
-	else if (MATCH_INI_STON("TOOLCHAIN", "version"))
-		config->version = strdup(value);
-	else
-		return 0;
-
-	return 1;
 }
 
 /**
@@ -378,44 +375,6 @@ static int default_cfg_handler(void *user, const char *section, const char *name
 		return 0;
 
 	return 1;
-}
-
-/**
- * @func get_toolchain_info -- fetch config info from a toolchain's info.ini
- * @arg path - path to toolchain's info.ini
- * @return: struct containing toolchain config info
- */
-static toolchain_config get_toolchain_info(const char *path)
-{
-	toolchain_config config;
-	char info_path[PATH_MAX];
-	char *identifier;
-
-	memset(&config, 0, sizeof(config));
-
-	/*
-	 * A stock toolchain describes itself with ToolchainInfo.plist, whose
-	 * only key is a reverse-DNS Identifier.  Take the last component as
-	 * the name, which is what our callers print, and fall through to
-	 * info.ini for a toolchain in the older layout.
-	 */
-	if ((identifier = xt_toolchain_identifier(path)) != NULL) {
-		char *last = strrchr(identifier, '.');
-
-		config.name = strdup(last != NULL ? last + 1 : identifier);
-		config.version = strdup("");
-		free(identifier);
-		return config;
-	}
-
-	snprintf(info_path, sizeof(info_path), "%s/info.ini", path);
-
-	if (ini_parse(info_path, toolchain_cfg_handler, &config) != (-1))
-		return config;
-
-	fprintf(stderr, "xcrun: error: failed to retrieve toolchain info from '%s'. (errno=%s)\n",
-		path, strerror(errno));
-	exit(1);
 }
 
 /**
@@ -1101,8 +1060,9 @@ static int xcrun_main(int argc, char *argv[])
 	char *sdk_env = NULL;
 	char *toolchain_env = NULL;
 
-	static int help_f, verbose_f, log_f, find_f, run_f, nocache_f, killcache_f, version_f, sdk_f, toolchain_f, ssdkp_f, ssdkv_f, ssdkpp_f, ssdktt_f, ssdkpv_f, ssdkplatp_f, ssdkplatv_f;
-	help_f = verbose_f = log_f = find_f = run_f = nocache_f = killcache_f = version_f = sdk_f = toolchain_f = ssdkp_f = ssdkv_f = ssdkpp_f = ssdktt_f = ssdkpv_f = ssdkplatp_f = ssdkplatv_f = 0;
+	static enum show_kind show_kind = SHOW_NONE;
+	static int show_toolchain_f, verbose_f, log_f, find_f, run_f, nocache_f, killcache_f, version_f, sdk_f, toolchain_f;
+	show_toolchain_f = verbose_f = log_f = find_f = run_f = nocache_f = killcache_f = version_f = sdk_f = toolchain_f = 0;
 
 	/* Supported options */
 	static struct option options[] = {
@@ -1116,28 +1076,27 @@ static int xcrun_main(int argc, char *argv[])
 		{ "run", required_argument, 0, 'r' },
 		{ "no-cache", no_argument, 0, 'n' },
 		{ "kill-cache", no_argument, 0, 'k' },
-		{ "show-sdk-path", no_argument, &ssdkp_f, 1 },
-		{ "show-sdk-version", no_argument, &ssdkv_f, 1 },
-		{ "show-sdk-target-triple", no_argument, &ssdktt_f, 1},
-		{ "show-sdk-toolchain-path", no_argument, &ssdkpp_f, 1 },
-		{ "show-sdk-toolchain-version", no_argument, &ssdkpv_f, 1 },
-		{ "show-sdk-platform-path", no_argument, &ssdkplatp_f, 1 },
-		{ "show-sdk-platform-version", no_argument, &ssdkplatv_f, 1 },
+		{ "show-sdk-path", no_argument, 0, SHOW_SDK_PATH },
+		{ "show-sdk-version", no_argument, 0, SHOW_SDK_VERSION },
+		{ "show-sdk-build-version", no_argument, 0, SHOW_SDK_BUILD_VERSION },
+		{ "show-sdk-platform-path", no_argument, 0, SHOW_SDK_PLATFORM_PATH },
+		{ "show-sdk-platform-version", no_argument, 0, SHOW_SDK_PLATFORM_VERSION },
+		{ "show-toolchain-path", no_argument, 0, 'T' },
 		{ NULL, 0, 0, 0 }
 	};
 
-	/* Print help if nothing is specified */
+	/* Nothing to do is misuse of the tool, and is answered as such. */
 	if (argc < 2)
-		usage();
+		usage(EX_USAGE);
 
 	/* Only parse arguments if they are given */
 	if (*(*(argv + 1)) == '-') {
 		if (strcmp(argv[1], "-") == 0 || strcmp(argv[1], "--") == 0)
-			usage();
-		while ((ch = getopt_long_only(argc, argv, "+hvlr:f:nk", options, &optindex)) != (-1)) {
+			usage(EX_USAGE);
+		while ((ch = getopt_long_only(argc, argv, ":+hvlr:f:nk", options, &optindex)) != (-1)) {
 			switch (ch) {
 				case 'h':
-					help_f = 1;
+					usage(0);
 					break;
 				case 'v':
 					verbose_f = 1;
@@ -1154,6 +1113,16 @@ static int xcrun_main(int argc, char *argv[])
 					find_f = 1;
 					tool_called = dup_basename(optarg);
 					++argc_offset;
+					break;
+				case SHOW_SDK_PATH:
+				case SHOW_SDK_VERSION:
+				case SHOW_SDK_BUILD_VERSION:
+				case SHOW_SDK_PLATFORM_PATH:
+				case SHOW_SDK_PLATFORM_VERSION:
+					show_kind = (enum show_kind)ch;
+					break;
+				case 'T':
+					show_toolchain_f = 1;
 					break;
 				case 'n':
 					nocache_f = 1;
@@ -1218,9 +1187,17 @@ static int xcrun_main(int argc, char *argv[])
 							break;
 					}
 					break;
+				case ':':
+					fprintf(stderr, "%s: error: argument to '%s'"
+					    " is missing\n", progname,
+					    argv[optind - 1]);
+					usage(EX_USAGE);
 				case '?':
 				default:
-					help_f = 1;
+					fprintf(stderr, "%s: error: unrecognized"
+					    " option: %s\n", progname,
+					    argv[optind - 1]);
+					usage(EX_USAGE);
 					break;
 			}
 
@@ -1247,10 +1224,6 @@ static int xcrun_main(int argc, char *argv[])
 		exit(1);
 	}
 
-	/* Print help? */
-	if (help_f == 1 || argc < 2)
-		usage();
-
 	/* Print version? */
 	if (version_f == 1)
 		version();
@@ -1273,86 +1246,87 @@ static int xcrun_main(int argc, char *argv[])
 			current_toolchain = default_toolchain_name();
 	}
 
-	/* Show SDK path? */
-	if (ssdkp_f == 1) {
-		printf("%s\n", get_sdk_path(current_sdk));
-		exit(0);
-	}
+	/*
+	 * Print the one thing that was asked for.  Which of the --show-*
+	 * options that is was decided while reading them, so the answer
+	 * given is the last one asked for and not a fixed order.
+	 */
+	switch (show_kind) {
+		case SHOW_SDK_PATH:
+			printf("%s\n", get_sdk_path(current_sdk));
+			exit(0);
 
-	/* Show SDK platform path? */
-	if (ssdkplatp_f == 1) {
-		char *sdk = get_sdk_path(current_sdk);
-		char *platform = xt_sdk_platform_path(sdk);
+		case SHOW_SDK_VERSION:
+			/* Apple's xcrun prints the bare version and nothing else. */
+			printf("%s\n", get_sdk_info(get_sdk_path(current_sdk)).version);
+			exit(0);
 
-		if (platform == NULL) {
-			fprintf(stderr, "xcrun: error: SDK \'%s\' is not inside a platform.\n",
-				current_sdk);
-			exit(1);
+		case SHOW_SDK_BUILD_VERSION: {
+			char *build = xt_sdk_build_version(get_sdk_path(current_sdk));
+
+			if (build == NULL) {
+				fprintf(stderr, "xcrun: error: no build version for SDK '%s'.\n",
+					current_sdk);
+				exit(1);
+			}
+
+			printf("%s\n", build);
+			exit(0);
 		}
 
-		printf("%s\n", platform);
-		exit(0);
-	}
+		case SHOW_SDK_PLATFORM_PATH: {
+			char *platform = xt_sdk_platform_path(get_sdk_path(current_sdk));
 
-	/* Show SDK platform version? */
-	if (ssdkplatv_f == 1) {
-		char *platform = xt_sdk_platform_path(get_sdk_path(current_sdk));
-		char *version = NULL;
+			if (platform == NULL) {
+				fprintf(stderr, "xcrun: error: SDK '%s' is not inside a platform.\n",
+					current_sdk);
+				exit(1);
+			}
 
-		if (platform != NULL) {
-			/*
-			 * Apple's platform records the same version under
-			 * "Version" and CFBundleShortVersionString; take
-			 * the one that names itself, and accept the bundle
-			 * key from a platform that carries only that.
-			 */
-			if ((version = xt_platform_setting(platform, "Version")) == NULL)
-				version = xt_platform_setting(platform,
-				    "CFBundleShortVersionString");
+			printf("%s\n", platform);
+			exit(0);
 		}
 
-		if (version == NULL) {
-			fprintf(stderr, "xcrun: error: no platform version for SDK \'%s\'.\n",
-				current_sdk);
-			exit(1);
+		case SHOW_SDK_PLATFORM_VERSION: {
+			char *platform = xt_sdk_platform_path(get_sdk_path(current_sdk));
+			char *version = NULL;
+
+			if (platform != NULL) {
+				/*
+				 * Apple's platform records the same version under
+				 * "Version" and CFBundleShortVersionString; take
+				 * the one that names itself, and accept the bundle
+				 * key from a platform that carries only that.
+				 */
+				if ((version = xt_platform_setting(platform, "Version")) == NULL)
+					version = xt_platform_setting(platform,
+					    "CFBundleShortVersionString");
+			}
+
+			if (version == NULL) {
+				fprintf(stderr, "xcrun: error: no platform version for SDK '%s'.\n",
+					current_sdk);
+				exit(1);
+			}
+
+			printf("%s\n", version);
+			exit(0);
 		}
 
-		printf("%s\n", version);
-		exit(0);
+		case SHOW_NONE:
+			if (show_toolchain_f == 1) {
+				printf("%s\n", get_toolchain_path(current_toolchain));
+				exit(0);
+			}
+			break;
 	}
 
-	/* Show SDK version? */
-	if (ssdkv_f == 1) {
-		/* Apple's xcrun prints the bare version and nothing else. */
-		printf("%s\n", get_sdk_info(get_sdk_path(current_sdk)).version);
-		exit(0);
-	}
-
-	/* Show SDK toolchain path? */
-	if (ssdkpp_f == 1) {
-		printf("%s\n", get_toolchain_path(current_toolchain));
-		exit(0);
-	}
-
-	/* Show SDK toolchain version? */
-	if (ssdkpv_f == 1) {
-		printf("%s SDK Toolchain version %s (%s)\n", get_sdk_info(get_sdk_path(current_sdk)).name, get_toolchain_info(get_toolchain_path(current_toolchain)).version, get_toolchain_info(get_toolchain_path(current_toolchain)).name);
-		exit(0);
-	}
-
-	/* Show SDK target triple ? */
-	if (ssdktt_f == 1) {
-		printf("%s\n", get_target_triple(current_sdk));
-		exit(0);
-	}
-
-	/* Clear the lookup cache? */
-	if (killcache_f == 1)
-		fprintf(stderr, "xcrun: warning: --kill-cache not supported.\n");
-
-	/* Don't use the lookup cache? */
-	if (nocache_f == 1)
-		fprintf(stderr, "xcrun: warning: --no-cache not supported.\n");
+	/*
+	 * The cache flags are taken and nothing is said about them: a lookup
+	 * here is made by running the toolchain's own xcodebuild, so there is
+	 * no cache of our own for them to bypass or clear, and complaining
+	 * about a flag the help advertises helps nobody.
+	 */
 
 	/* Turn on verbose mode? */
 	if (verbose_f == 1)
