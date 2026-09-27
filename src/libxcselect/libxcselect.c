@@ -29,9 +29,13 @@
  */
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libproc.h>
 #include <limits.h>
+#include <os/log.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -671,31 +675,214 @@ xcselect_invoke_xcrun(char *tool_name, int argc, char *argv[],
 	exit(1);
 }
 
-/* ---- still to reconstruct -------------------------------------------- */
+/* ---- developer tools, and asking for the tools ----------------------- */
 
 /*
- * The shipped library decides this from a fixed list of bundle
- * identifiers that live in its read-only data, which is compared after a
- * "com.apple." prefix.  The list has not been read out of the binary
- * yet, so this answers no until it is, rather than guessing at
- * identifiers and claiming a bundle is a developer tool when it is not.
+ * The bundle identifiers the shipped library treats as a developer tool.
+ * They sit in its read-only data behind a shared "com.apple." prefix, and
+ * only the part after that prefix is compared, so the prefix on its own is
+ * not one.  There are nine of them.  The loop that walks the table stops on
+ * a counter that is tested after it has been stepped, so it reads one
+ * entry past what the bound alone suggests, and "RealityComposerPro" is
+ * that ninth one.
  */
+static const char * const dev_tool_bundles[] = {
+	"dt.Xcode",
+	"dt.SourceEdit",
+	"iphonesimulator",
+	"dt.Instruments",
+	"FileMerge",
+	"itunes.connect.ApplicationLoader",
+	"AccessibilityInspector",
+	"RealityComposer",
+	"RealityComposerPro",
+};
+
 bool
 xcselect_bundle_is_developer_tool(char *bundle_id)
 {
+	static const char prefix[] = "com.apple.";
+	const size_t prefix_len = sizeof(prefix) - 1;
+	size_t i;
+
+	if (bundle_id == NULL)
+		return false;
+	if (strlen(bundle_id) < prefix_len)
+		return false;
+	if (strncmp(bundle_id, prefix, prefix_len) != 0)
+		return false;
+
+	for (i = 0; i < sizeof(dev_tool_bundles) / sizeof(*dev_tool_bundles); i++) {
+		if (strcmp(bundle_id + prefix_len, dev_tool_bundles[i]) == 0)
+			return true;
+	}
+
 	return false;
 }
 
 /*
- * The shipped library posts to a launchd service through a Mach message
- * port.  Nothing here should put a prompt up on a user's behalf, so this
- * reports that it did not, and callers carry on as they would if the
- * service were not running.
+ * A tool that cannot be found asks launchd to put an installer up, by way
+ * of a Mach message port.  The payload is a one-key property list saying
+ * which tool wanted it, and it goes to a service named on a port rather
+ * than over the launchd socket API, so the request itself is one Mach
+ * message.  CoreFoundation is opened and resolved at run time, which is
+ * what keeps this library linking against nothing but the system
+ * libraries, the way the shipped one does.
  */
+#define XCSELECT_CF_PATH \
+	"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+#define XCSELECT_INSTALL_PORT \
+	"com.apple.dt.CommandLineTools.installondemand"
+
+/*
+ * The format is kCFPropertyListBinaryFormat_v1_0, which is 200, not the
+ * 0xc8 it looks like written down here, and the wait the shipped library
+ * allows is five seconds on each side of the send.
+ */
+#define XCSELECT_PLIST_BINARY		0xc8
+#define XCSELECT_INSTALL_WAIT		5.0
+
+/*
+ * These prototypes are taken from how the shipped library actually calls
+ * into CoreFoundation, and deliberately not from its headers, which are
+ * wrong about two of the functions involved in both the public and the
+ * internal SDK:
+ *
+ *	CFPropertyListCreateData takes four arguments, not the five its
+ *	header claims with a trailing CFErrorRef.  Calling it as the
+ *	header says leaves that fifth argument undefined for the callee
+ *	to write through.
+ *
+ *	CFMessagePortSendRequest takes the reply mode and the return data
+ *	before the two timeouts, not after them as its header claims.
+ *	The shipped library puts a null reply mode and a null return data
+ *	in the third and fourth argument registers and the two five-second
+ *	waits in the first two floating point registers, which is only
+ *	consistent with the former order.
+ *
+ * The dlsym-and-declare-here approach is what the shipped library uses
+ * for the same reason, so this is not a shortcut around it.
+ */
+typedef void (*cf_release_fn)(const void *);
+typedef const void *(*cf_string_fn)(const void *, const char *, uint32_t);
+typedef const void *(*cf_dict_fn)(const void *, long, const void *, const void *);
+typedef void (*cf_dict_set_fn)(const void *, const void *, const void *);
+typedef const void *(*cf_plist_fn)(const void *, const void *, uint32_t,
+    uint32_t);
+typedef const void *(*cf_port_fn)(const void *, const void *);
+typedef int32_t (*cf_send_fn)(const void *, long, const void *, void **,
+    void **, double, double);
+
+struct xcselect_cf {
+	cf_release_fn		release;
+	cf_string_fn		string;
+	cf_dict_fn		dict;
+	cf_dict_set_fn		set;
+	cf_plist_fn		plist;
+	cf_port_fn		port;
+	cf_send_fn		send;
+};
+
+static void *xcselect_cf_handle;
+
+static void
+xcselect_cf_open(void)
+{
+	xcselect_cf_handle = dlopen(XCSELECT_CF_PATH, RTLD_LAZY);
+}
+
+static void *
+xcselect_cf_symbol(const char *name)
+{
+	/*
+	 * The shipped library reaches for dispatch_once here, which would
+	 * mean turning on blocks for this file just to open one path.
+	 * pthread_once is the same guarantee out of the same library and
+	 * leaves the build flags alone.
+	 */
+	static pthread_once_t once = PTHREAD_ONCE_INIT;
+
+	pthread_once(&once, xcselect_cf_open);
+
+	return xcselect_cf_handle != NULL ?
+	    dlsym(xcselect_cf_handle, name) : NULL;
+}
+
+/*
+ * The shipped library stops at the first symbol it cannot resolve and
+ * answers no without asking for anything, so a CoreFoundation that is
+ * present but incomplete does not turn into a half-built request.
+ */
+static bool
+xcselect_cf_load(struct xcselect_cf *cf)
+{
+	cf->string = (cf_string_fn)xcselect_cf_symbol("CFStringCreateWithCString");
+	cf->set = (cf_dict_set_fn)xcselect_cf_symbol("CFDictionarySetValue");
+	cf->plist = (cf_plist_fn)xcselect_cf_symbol("CFPropertyListCreateData");
+	cf->dict = (cf_dict_fn)xcselect_cf_symbol("CFDictionaryCreateMutable");
+	cf->port = (cf_port_fn)xcselect_cf_symbol("CFMessagePortCreateRemote");
+	cf->send = (cf_send_fn)xcselect_cf_symbol("CFMessagePortSendRequest");
+	cf->release = (cf_release_fn)xcselect_cf_symbol("CFRelease");
+
+	return cf->string != NULL && cf->set != NULL && cf->plist != NULL &&
+	    cf->dict != NULL && cf->port != NULL && cf->send != NULL &&
+	    cf->release != NULL;
+}
+
 bool
 xcselect_trigger_install_request(const char *tool_name)
 {
-	return false;
+	struct xcselect_cf cf;
+	const void *key, *value, *dict, *data, *name, *port;
+	char self[0x1000], parent[0x1000];
+	int32_t sent;
+
+	if (!xcselect_cf_load(&cf))
+		return false;
+
+	/* The service logs who is asking and who asked them, so that a
+	 * request nobody expected can be traced back to a program. */
+	if (proc_pidpath(getpid(), self, sizeof(self)) > 0 &&
+	    proc_pidpath(getppid(), parent, sizeof(parent)) > 0) {
+		os_log_t log = os_log_create(XCSELECT_INSTALL_PORT, "trace");
+
+		if (os_log_type_enabled(log, OS_LOG_TYPE_INFO))
+			os_log_info(log, "Command Line Tools installation"
+			    " request from '%{public}s' (PID %d), parent"
+			    " process '%{public}s' (parent PID %d)",
+			    self, getpid(), parent, getppid());
+	}
+
+	dict = cf.dict(NULL, 0, NULL, NULL);
+	key = cf.string(NULL, "tool-name", 0);
+	value = cf.string(NULL, tool_name, 0);
+	cf.set(dict, key, value);
+	data = cf.plist(NULL, dict, XCSELECT_PLIST_BINARY, 0);
+	cf.release(value);
+	cf.release(key);
+	cf.release(dict);
+
+	if (data == NULL)
+		return false;
+
+	name = cf.string(NULL, XCSELECT_INSTALL_PORT, 0);
+	port = cf.port(NULL, name);
+	if (port == NULL) {
+		cf.release(data);
+		cf.release(name);
+		return false;
+	}
+
+	/* Message identifier zero, no reply asked for, and five seconds
+	 * allowed on each side of the send. */
+	sent = cf.send(port, 0, data, NULL, NULL, XCSELECT_INSTALL_WAIT,
+	    XCSELECT_INSTALL_WAIT);
+
+	cf.release(data);
+	cf.release(name);
+	cf.release(port);
+
+	return sent == 0;
 }
 
 /* ---- man paths ------------------------------------------------------- */
