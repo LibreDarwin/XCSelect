@@ -143,18 +143,18 @@ static char *get_developer_path(void)
 
 		/*
 		 * No per-user selection.  libxcselect answers the rest --
-		 * the link xcode-select -s writes, this binary's own
-		 * Developer directory, then the system defaults -- which is
-		 * the library Apple's xcode-select asks the same question
-		 * of, so xcrun and this tool cannot disagree.
+		 * the symlinks xcode-select -s writes, the data file, then
+		 * the system defaults -- which is the library Apple's
+		 * xcode-select asks the same question of, so xcrun and this
+		 * tool cannot disagree.
 		 */
 		static char devdir[PATH_MAX];
-		bool cltools = false, missing = false, invalid = false;
+		bool from_env = false, cltools = false, fallback = false;
 
 		(void)st;
 
 		if (xcselect_get_developer_dir_path(devdir, sizeof(devdir),
-		    &cltools, &missing, &invalid))
+		    &from_env, &cltools, &fallback))
 			return devdir;
 
 		fprintf(stderr, "xcode-select: error: unable to determine the"

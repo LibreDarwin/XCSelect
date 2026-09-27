@@ -604,33 +604,32 @@ static char *get_developer_path(void)
 
 		/*
 		 * No per-user selection.  libxcselect answers the rest --
-		 * the link xcode-select -s writes, this binary's own
-		 * Developer directory, then the system defaults.  Apple's
-		 * xcrun asks the same library, which is what stops it and
-		 * xcode-select from disagreeing about where the tools are.
+		 * the symlinks xcode-select -s writes, the data file, then
+		 * the system defaults.  Apple's xcrun asks the same library,
+		 * which is what stops it and xcode-select from disagreeing
+		 * about where the tools are.
 		 */
 		static char devdir[PATH_MAX];
-		bool cltools = false, missing = false, invalid = false;
+		bool from_env = false, cltools = false, fallback = false;
 
 		(void)st;
 
 		if (xcselect_get_developer_dir_path(devdir, sizeof(devdir),
-		    &cltools, &missing, &invalid)) {
+		    &from_env, &cltools, &fallback)) {
 			verbose_printf(stdout, "xcrun: info: using developer"
 			    " path \'%s\' from libxcselect%s.\n", devdir,
 			    cltools ? " (command line tools)" : "");
-			if (invalid)
-				verbose_printf(stdout, "xcrun: info: note: that"
-				    " directory does not exist.\n");
 			return devdir;
 		}
 
-		if (missing)
-			fprintf(stderr, "xcrun: error: no developer directory"
-			    " has been selected.\n");
-		else
-			fprintf(stderr, "xcrun: error: unable to determine the"
-			    " developer directory.\n");
+		/*
+		 * One message for both ways this can fail.  There is no
+		 * out-parameter for "nothing was selected" as against "what
+		 * was selected is gone", so the two are not told apart here
+		 * any more than libxcselect tells them apart.
+		 */
+		fprintf(stderr, "xcrun: error: unable to determine the"
+		    " developer directory.\n");
 		return NULL;
 	}
 
