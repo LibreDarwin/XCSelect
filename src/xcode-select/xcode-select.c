@@ -87,7 +87,7 @@ static void usage(const char *error)
  */
 static void version(void)
 {
-	fprintf(stdout, "xcode-select version %s\n", TOOL_VERSION);
+	fprintf(stdout, "xcode-select version %s.\n", TOOL_VERSION);
 
 	exit(0);
 }
@@ -244,8 +244,11 @@ int main(int argc, char *argv[])
 	 * A leading colon leaves the complaining to us, which is what decides
 	 * how it is worded: a missing argument is not an argument that is not
 	 * there, and the two are told apart here rather than by getopt.
+	 *
+	 * --install is a long option only: -I is not a switch, and asking
+	 * for it is an invalid argument the same as any other.
 	 */
-	while ((ch = getopt_long_only(argc, argv, ":hvprIs:", options,
+	while ((ch = getopt_long_only(argc, argv, ":hvprs:", options,
 	    NULL)) != (-1)) {
 		switch (ch) {
 			case 'h':
@@ -285,35 +288,118 @@ int main(int argc, char *argv[])
 		usage(complaint);
 	}
 
+	/*
+	 * Only one thing may be asked for.  Repeating the same thing is not
+	 * asking for two -- -p -p prints the path once, and -s a -s b
+	 * switches to the last one given -- so what is counted is how many
+	 * different actions were named, not how many options there were.
+	 *
+	 * --switch is not one of the counted actions.  Naming a directory to
+	 * switch to alongside something else is refused by that other thing
+	 * rather than here, which is why -p -s /some/path prints the path and
+	 * -s /some/path -p prints the path too, and neither of them mentions
+	 * the switch.
+	 */
+	{
+		int actions = (version_f != 0) + (printpath_f != 0) +
+		    (install_f != 0) + (reset_f != 0);
+
+		if (actions > 1)
+			usage("cannot execute multiple actions");
+	}
+
 	if (version_f == 1)
 		version();
-
-	if (install_f == 1) {
-		xcselect_trigger_install_request("xcode-select");
-		return 0;
-	}
-
-	if (reset_f == 1) {
-		/* Back to the default command line tools path. */
-		if (validate_directory_path(XCRUN_DEFAULT_DEVELOPER_DIR) == 0)
-			return set_developer_path(XCRUN_DEFAULT_DEVELOPER_DIR) == 0 ? 0 : 1;
-		fprintf(stderr, "xcode-select: error: unable to determine the"
-		    " default developer directory.\n");
-		return 1;
-	}
-
-	if (switch_f == 1) {
-		if (validate_directory_path(path) == 0)
-			return set_developer_path(path) == 0 ? 0 : 1;
-		else
-			return 1;
-	}
 
 	if (printpath_f == 1) {
 		path = get_developer_path();
 		if (path == NULL)
 			return 1;
 		fprintf(stdout, "%s\n", path);
+		return 0;
+	}
+
+	if (install_f == 1) {
+		char devdir[PATH_MAX];
+		bool from_env = false, cltools = false, fallback = false;
+
+		/*
+		 * There is nothing to install when a developer directory can
+		 * already be named, which is the whole of what this asks:
+		 * whether the tools are there.  Which one it names is not
+		 * reported, and neither is the dialog, so this never has to
+		 * decide whether it could put one up.
+		 */
+		if (xcselect_get_developer_dir_path(devdir, sizeof(devdir),
+		    &from_env, &cltools, &fallback)) {
+			fprintf(stderr, "%s: note: Command line tools are"
+			    " already installed. Use \"Software Update\" in"
+			    " System Settings or the softwareupdate command"
+			    " line interface to install updates\n",
+			    getprogname());
+			return 1;
+		}
+
+		if (xcselect_trigger_install_request(getprogname())) {
+			fputs("xcode-select: note: install requested for"
+			    " command line developer tools\n", stderr);
+			return 0;
+		}
+
+		fputs("xcode-select: error: no developer tools were found, and"
+		    " no install could be requested (perhaps no UI is"
+		    " present), please install manually from"
+		    " 'developer.apple.com'.\n", stderr);
+		return 1;
+	}
+
+	if (switch_f == 1) {
+		char found[PATH_MAX];
+		bool cltools = false;
+
+		/*
+		 * The directory is looked at before the privilege is, so a
+		 * path that names nothing is reported as that whether or not
+		 * the caller could have switched to it anyway.
+		 *
+		 * What counts as a developer directory is the library's
+		 * question and not this one's: a bundle is taken for the
+		 * developer directory inside it, and a directory that is
+		 * merely a directory -- /tmp, /usr -- is not one.  A path
+		 * that names nothing is one complaint, not several, so the
+		 * wording is left to here.
+		 */
+		if (!xcselect_find_developer_contents_from_path(path, found,
+		    sizeof(found), &cltools)) {
+			fprintf(stderr, "xcode-select: error: invalid developer"
+			    " directory '%s'\n", path);
+			return 1;
+		}
+
+		if (geteuid() != 0) {
+			fprintf(stderr, "xcode-select: error: --switch must be"
+			    " run as root (e.g. `sudo %s --switch"
+			    " <xcode_folder_path>`).\n", getprogname());
+			return 1;
+		}
+
+		return set_developer_path(path) == 0 ? 0 : 1;
+	}
+
+	if (reset_f == 1) {
+		if (geteuid() != 0) {
+			fprintf(stderr, "xcode-select: error: --reset must be"
+			    " run as root (e.g. `sudo %s --reset`).\n",
+			    getprogname());
+			return 1;
+		}
+
+		/* Back to the default command line tools path. */
+		if (validate_directory_path(XCRUN_DEFAULT_DEVELOPER_DIR) == 0)
+			return set_developer_path(XCRUN_DEFAULT_DEVELOPER_DIR) == 0 ? 0 : 1;
+		fprintf(stderr, "xcode-select: error: unable to determine the"
+		    " default developer directory.\n");
+		return 1;
 	}
 
 	return 0;
