@@ -27,8 +27,10 @@ DESTDIR ?=
 BUILD_DIR := build/$(CONFIG)
 OBJDIR    := $(BUILD_DIR)/obj
 
+# -fblocks: libxcrun hands xcselect a block for utilities it does not know,
+# so the handler registered with it has to be a real block.
 CFLAGS := $(OPT) -std=c11 -D_DARWIN_C_SOURCE -isysroot "$(SDK)" -Wall -Wextra \
-	  -Wno-unused-parameter -I src/common -I src/libxcselect -I src/xcrun
+	  -Wno-unused-parameter -fblocks -I src/common -I src/libxcselect -I src/xcrun
 
 # Apple's libxcselect is a 1.0.0 dylib, so match the version stamps.
 DYLIB_VERSION := 1.0.0

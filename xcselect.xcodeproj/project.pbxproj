@@ -333,6 +333,7 @@
 					"-Wall",
 					"-Wextra",
 					"-Wno-unused-parameter",
+					"-fblocks",
 				);
 				PRODUCT_NAME = libxcselect;
 				SKIP_INSTALL = YES;
@@ -357,6 +358,7 @@
 					"-Wall",
 					"-Wextra",
 					"-Wno-unused-parameter",
+					"-fblocks",
 				);
 				PRODUCT_NAME = libxcselect;
 				SKIP_INSTALL = YES;
@@ -388,6 +390,7 @@
 					"-Wall",
 					"-Wextra",
 					"-Wno-unused-parameter",
+					"-fblocks",
 				);
 				OTHER_LDFLAGS = (
 					"-L$(CONFIGURATION_BUILD_DIR)",
@@ -421,6 +424,7 @@
 					"-Wall",
 					"-Wextra",
 					"-Wno-unused-parameter",
+					"-fblocks",
 				);
 				OTHER_LDFLAGS = (
 					"-L$(CONFIGURATION_BUILD_DIR)",
@@ -453,6 +457,7 @@
 					"-Wall",
 					"-Wextra",
 					"-Wno-unused-parameter",
+					"-fblocks",
 				);
 				OTHER_LDFLAGS = (
 					"-L$(CONFIGURATION_BUILD_DIR)",
@@ -484,6 +489,7 @@
 					"-Wall",
 					"-Wextra",
 					"-Wno-unused-parameter",
+					"-fblocks",
 				);
 				OTHER_LDFLAGS = (
 					"-L$(CONFIGURATION_BUILD_DIR)",

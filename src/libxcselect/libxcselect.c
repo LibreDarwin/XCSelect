@@ -28,12 +28,16 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
+#include <Block.h>
+#include <crt_externs.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libproc.h>
 #include <limits.h>
+#include <mach-o/fat.h>
+#include <mach-o/loader.h>
 #include <os/log.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -52,6 +56,9 @@
 
 /* What a developer directory has to hold to be one. */
 #define XCSELECT_XCRUN		"usr/lib/libxcrun.dylib"
+
+/* The other half of that test: the xcrun a directory of its own carries. */
+#define XCSELECT_XCRUN_SHIM	"usr/bin/xcrun"
 
 /* The symlinks consulted, in order, for a directory someone has selected. */
 static const char * const dev_dir_links[] = {
@@ -605,6 +612,235 @@ xcselect_host_sdk_path(int which, char **out)
 
 /* ---- running a tool -------------------------------------------------- */
 
+/*
+ * A shim is a stand-in for xcrun that calls back into libxcselect instead of
+ * doing the work itself.  The toolchain marks one with a __xcrun_shim
+ * section inside its __DATA segment, and a developer directory holding one
+ * is not a real installation -- which is what the caller acts on.
+ */
+#define XCSELECT_SHIM_SEGMENT		"__DATA"
+#define XCSELECT_SHIM_SECTION		"__xcrun_shim"
+
+static bool
+path_is_xcrun_shim(const char *path)
+{
+	struct mach_header_64 mach;
+	struct segment_command_64 seg;
+	struct section_64 sect;
+	struct load_command lc;
+	uint32_t fathead[4], offset, cmdsize;
+	FILE *f;
+	size_t i;
+	long start;
+	bool shim = false;
+
+	if ((f = fopen(path, "rb")) == NULL)
+		return false;
+
+	/* A universal binary is big-endian on disk, so a little-endian read
+	 * of its magic comes out byte-swapped, and so does the offset the
+	 * first slice starts at. */
+	if (fread(fathead, 1, sizeof(fathead), f) != sizeof(fathead))
+		goto out;
+	if (fathead[0] == FAT_CIGAM) {
+		if (fread(&offset, 1, sizeof(offset), f) != sizeof(offset))
+			goto out;
+		offset = __builtin_bswap32(offset);
+		if (offset == 0 ||
+		    fseek(f, (long)offset, SEEK_SET) != 0)
+			goto out;
+	} else if (fseek(f, 0, SEEK_SET) != 0) {
+		/* A thin binary has nothing in front of its Mach header. */
+		goto out;
+	}
+
+	if (fread(&mach, 1, sizeof(mach), f) != sizeof(mach))
+		goto out;
+	if (mach.magic != MH_MAGIC_64 || mach.ncmds == 0)
+		goto out;
+
+	for (i = 0; i < mach.ncmds; i++) {
+		if ((start = ftell(f)) < 0)
+			goto out;
+		if (fread(&lc, 1, sizeof(lc), f) != sizeof(lc))
+			goto out;
+		cmdsize = lc.cmdsize;
+		if (cmdsize < sizeof(lc))
+			goto out;
+
+		/* A segment command is itself the load command, so rewind
+		 * and take it whole rather than piecemeal. */
+		if (lc.cmd == LC_SEGMENT_64 &&
+		    fseek(f, start, SEEK_SET) == 0 &&
+		    fread(&seg, 1, sizeof(seg), f) == sizeof(seg) &&
+		    memcmp(seg.segname, XCSELECT_SHIM_SEGMENT,
+		    sizeof(XCSELECT_SHIM_SEGMENT)) == 0) {
+			uint32_t s;
+
+			for (s = 0; s < seg.nsects; s++) {
+				if (fread(&sect, 1, sizeof(sect), f) !=
+				    sizeof(sect))
+					goto out;
+				if (memcmp(sect.sectname,
+				    XCSELECT_SHIM_SECTION,
+				    sizeof(XCSELECT_SHIM_SECTION)) == 0) {
+					shim = true;
+					goto out;
+				}
+			}
+		}
+
+		if (fseek(f, start + (long)cmdsize, SEEK_SET) != 0)
+			goto out;
+	}
+
+out:
+	fclose(f);
+
+	return shim;
+}
+
+/* Directories to try for a tool when no developer directory named one. */
+static const char * const tool_fallback_dirs[] = { "/usr/local/bin", NULL };
+
+/*
+ * Whether this process is App Sandboxed.  The shipped library imports
+ * __xpc_runtime_is_app_sandboxed and calls it outright, but that cannot be
+ * linked from here: the SDK's libSystem stub exports
+ * _xpc_runtime_is_app_sandboxed, with a single leading underscore, and
+ * nothing exports the double-underscore name the shipped library really
+ * imports.  So the name is looked up at run time, and a machine that has
+ * not got it is not in a sandbox, which is the answer we wanted anyway.
+ */
+static int (*xcselect_sandbox_query)(void);
+
+static void
+xcselect_find_sandbox_query(void)
+{
+	xcselect_sandbox_query = dlsym(RTLD_DEFAULT,
+	    "__xpc_runtime_is_app_sandboxed");
+}
+
+static bool
+process_is_app_sandboxed(void)
+{
+	static pthread_once_t once = PTHREAD_ONCE_INIT;
+
+	pthread_once(&once, xcselect_find_sandbox_query);
+
+	return xcselect_sandbox_query != NULL &&
+	    xcselect_sandbox_query() != 0;
+}
+
+/*
+ * What libxcrun calls for a utility it does not know, which is the only
+ * way a tool name reaches us once xcrun_main has taken over.  libxcrun
+ * owns the exit, so all that is left to report is whether the install
+ * request got through.  A file-scope literal is a global block, so it
+ * outlives the call without libxcrun having to copy it.
+ */
+static void (^xcselect_unknown_utility)(const char *) =
+    ^(const char *tool_name) {
+	if (xcselect_trigger_install_request(tool_name))
+		fprintf(stderr, "xcode-select: Failed to locate '%s',"
+		    " requesting installation of command line developer"
+		    " tools.\n", tool_name);
+	else
+		fprintf(stderr, "xcode-select: Failed to locate '%s', and no"
+		    " install could be requested (perhaps no UI is present)."
+		    " Please install manually from 'developer.apple.com'.\n",
+		    tool_name);
+};
+
+/* Hand the work to the libxcrun inside the developer directory. */
+static void
+xcselect_invoke_xcrun_via_library(const char *path, char *tool_name, int argc,
+    char *argv[], const char *devdir)
+{
+	int (*xcrun_main)(char *, int, char *[], const char *);
+	void (*set_handler)(void (^)(const char *));
+	void *handle;
+
+	if ((handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL)) == NULL) {
+		fprintf(stderr, "xcrun: error: unable to load libxcrun (%s).\n",
+		    dlerror());
+		exit(1);
+	}
+
+	if ((xcrun_main = (int (*)(char *, int, char *[], const char *))
+	    dlsym(handle, "xcrun_main")) == NULL) {
+		fprintf(stderr,
+		    "xcrun: error: unable to resolve xcrun_main (%s).\n",
+		    dlerror());
+		exit(1);
+	}
+
+	/*
+	 * Called as something other than xcrun itself -- xcode-select, or a
+	 * tool -- we are the ones who decide what happens to a utility
+	 * that cannot be found, so take that over from libxcrun.
+	 */
+	if (strcmp(*_NSGetProgname(), "xcrun") != 0) {
+		set_handler = (void (*)(void (^)(const char *)))dlsym(handle,
+		    "xcrun_set_unknown_utility_handler");
+		if (set_handler != NULL)
+			set_handler(xcselect_unknown_utility);
+	}
+
+	xcrun_main(tool_name, argc, argv, devdir);
+
+	fwrite("xcrun: error: unexpected exit from xcrun_main", 1, 45,
+	    stderr);
+	exit(1);
+}
+
+/* Hand the work to an xcrun, which replaces this process. */
+static void
+xcselect_invoke_xcrun_via_binary(const char *path, char *argv[],
+    const char *devdir, bool was_environment)
+{
+	const char *why;
+
+	execv(path, argv);
+
+	/* Only reached if the exec failed. */
+	if (errno == ENOENT) {
+		if (path_is_dir(devdir)) {
+			fprintf(stderr, "xcrun: error: invalid %s path (%s),"
+			    " missing xcrun at: %s\n",
+			    was_environment ? "DEVELOPER_DIR" :
+			    "active developer", devdir, path);
+			exit(1);
+		}
+
+		if (was_environment) {
+			fprintf(stderr,
+			    "xcrun: error: missing DEVELOPER_DIR path: %s\n",
+			    devdir);
+			exit(1);
+		}
+
+		/*
+		 * The shipped library picks between these two with a second
+		 * test of errno, which is still ENOENT to get here, so the
+		 * first of them is the one it can actually print.
+		 */
+		why = (errno == ENOENT) ? "does not exist" : "is invalid";
+		fprintf(stderr, "xcrun: error: active developer path"
+		    " (\"%s\") %s\nUse `sudo xcode-select --switch"
+		    " path/to/Xcode.app` to specify the Xcode that you wish"
+		    " to use for command line developer tools, or use"
+		    " `xcode-select --install` to install the standalone"
+		    " command line developer tools.\nSee `man xcode-select`"
+		    " for more details.\n", devdir, why);
+		exit(1);
+	}
+
+	fprintf(stderr, "xcrun: error: unable to exec Xcode native xcrun"
+	    " (%s).\n", strerror(errno));
+	exit(1);
+}
+
 void
 xcselect_invoke_xcrun(char *tool_name, int argc, char *argv[],
     bool require_xcode)
@@ -613,65 +849,126 @@ xcselect_invoke_xcrun(char *tool_name, int argc, char *argv[],
 	char path[XCSELECT_BUF_SIZE];
 	char **args;
 	bool was_environment, was_cltools, was_default;
-	int i;
+	size_t i;
+	int extra;
 
-	if (xcselect_get_developer_dir_path(devdir, sizeof(devdir),
-	    &was_environment, &was_cltools, &was_default)) {
-		/*
-		 * A tool that genuinely needs Xcode is told so rather than
-		 * run against the Command Line Tools, which would report
-		 * confusing errors of its own.
-		 */
-		if (require_xcode && was_cltools) {
-			fprintf(stderr, "xcode-select: error: tool '%s' requires"
-			    " Xcode, but active developer directory '%s' is a"
-			    " command line tools instance\n", tool_name, devdir);
-			exit(1);
-		}
-
-		/* The xcrun we are about to become must not be re-entered. */
-		if (tool_name != NULL)
-			unsetenv("xcrun_log");
-
-		path_join(path, sizeof(path), devdir, XCSELECT_XCRUN);
-		if (path_exists(path)) {
-			/* Not yet reconstructed; see the RE note below. */
-			fprintf(stderr, "xcrun: error: unable to load"
-			    " libxcrun.\n");
-			exit(1);
-		}
-
-		/*
-		 * No libxcrun, so this is a developer directory from a
-		 * build of ours rather than a shipped one, and it still has
-		 * a real xcrun to hand the work to.
-		 */
-		path_join(path, sizeof(path), devdir, "usr/bin/xcrun");
-		if (!path_is_dir(devdir) || !path_exists(path)) {
-			fprintf(stderr, "xcrun: error: invalid %s path (%s),"
-			    " missing xcrun at: %s\n",
-			    was_environment ? "DEVELOPER_DIR" : "active developer",
-			    devdir, path);
-			exit(1);
-		}
-
-		if ((args = calloc((size_t)argc + 3, sizeof(*args))) == NULL)
-			exit(1);
-
-		args[0] = path;
-		if (tool_name != NULL)
-			args[1] = tool_name;
-		for (i = 0; i < argc; i++)
-			args[1 + (tool_name != NULL ? 1 : 0) + i] = argv[i];
-
-		execv(path, args);
-		fprintf(stderr, "xcrun: error: unable to exec Xcode native"
-		    " xcrun (%s).\n", strerror(errno));
+	if (process_is_app_sandboxed()) {
+		fputs("xcrun: error: cannot be used within an App Sandbox.\n",
+		    stderr);
 		exit(1);
 	}
 
-	fprintf(stderr, "xcrun: error: unable to determine the developer"
-	    " directory.\n");
+	if (!xcselect_get_developer_dir_path(devdir, sizeof(devdir),
+	    &was_environment, &was_cltools, &was_default)) {
+		/*
+		 * With nothing installed there is a tool to ask about only
+		 * if a name was given; otherwise we are xcrun itself, and
+		 * the answer is that there is nothing to run.
+		 */
+		if (tool_name == NULL) {
+			tool_name = "xcrun";
+			goto no_tools;
+		}
+		goto find_tool;
+	}
+
+	/*
+	 * A tool that genuinely needs Xcode is told so rather than run
+	 * against the Command Line Tools, which would report confusing
+	 * errors of its own.
+	 */
+	if (require_xcode && was_cltools) {
+		fprintf(stderr, "xcode-select: error: tool '%s' requires"
+		    " Xcode, but active developer directory '%s' is a"
+		    " command line tools instance\n", tool_name, devdir);
+		exit(1);
+	}
+
+	/* The xcrun we are about to become must not be re-entered. */
+	if (tool_name != NULL)
+		unsetenv("xcrun_log");
+
+	/* A developer directory of a shipped one is run from in place. */
+	path_join(path, sizeof(path), devdir, XCSELECT_XCRUN);
+	if (path_exists(path)) {
+		xcselect_invoke_xcrun_via_library(path, tool_name, argc, argv,
+		    devdir);
+		return;
+	}
+
+	/*
+	 * Not a shipped one, so the only xcrun left is whatever the
+	 * directory itself carries.  A shim there is not a real
+	 * installation -- it would call straight back in here -- so a
+	 * directory holding one is malformed rather than runnable.
+	 */
+	path_join(path, sizeof(path), devdir, XCSELECT_XCRUN_SHIM);
+	if (path_is_xcrun_shim(path)) {
+		fprintf(stderr,
+		    "xcode-select: error: malformed developer path (\"%s\")\n",
+		    devdir);
+		exit(1);
+	}
+
+	extra = (tool_name != NULL) ? 1 : 0;
+	if ((args = calloc((size_t)argc + extra + 1, sizeof(*args))) == NULL)
+		exit(1);
+	args[0] = path;
+	if (extra != 0)
+		args[1] = tool_name;
+	for (i = 0; i < (size_t)argc; i++)
+		args[1 + (size_t)extra + i] = argv[i];
+
+	xcselect_invoke_xcrun_via_binary(path, args, devdir, was_environment);
+	return;
+
+find_tool:
+	/* Nothing to run it with, so look for the tool itself. */
+	path_join(path, sizeof(path), "/usr/libexec/DeveloperTools",
+	    tool_name);
+	if (!path_exists(path)) {
+		for (i = 0; tool_fallback_dirs[i] != NULL; i++) {
+			path_join(path, sizeof(path), tool_fallback_dirs[i],
+			    tool_name);
+			if (path_exists(path))
+				break;
+		}
+		if (tool_fallback_dirs[i] == NULL)
+			goto no_tools;
+	}
+
+	if ((args = calloc((size_t)argc + 2, sizeof(*args))) == NULL)
+		exit(1);
+	args[0] = path;
+	for (i = 0; i < (size_t)argc; i++)
+		args[1 + i] = argv[i];
+
+	execv(path, args);
+	fprintf(stderr, "xcrun: error: unable to exec %s (%s).\n", path,
+	    strerror(errno));
+	exit(1);
+
+no_tools:
+	if (xcselect_trigger_install_request(getprogname()))
+		fputs("xcode-select: note: No developer tools were found,"
+		    " requesting install.\nIf developer tools are located at a"
+		    " non-default location on disk, use `sudo xcode-select"
+		    " --switch path/to/Xcode.app` to specify the Xcode that you"
+		    " wish to use for command line developer tools, and cancel"
+		    " the installation dialog.\nSee `man xcode-select` for more"
+		    " details.\n", stderr);
+	else
+		fputs("xcode-select: error: No developer tools were found and no"
+		    " install could be requested (possibly because there is no"
+		    " active GUI session).\nIf developer tools are located at a"
+		    " non-default location on disk, use `sudo xcode-select"
+		    " --switch path/to/Xcode.app` to specify the Xcode that you"
+		    " wish to use for command line developer tools.\nUse"
+		    " `xcode-select --install` to install the standalone command"
+		    " line developer tools, or visit http://adc.apple.com to"
+		    " download Xcode or the standalone command line tools"
+		    " installation package.\nSee `man xcode-select` for more"
+		    " details.\n", stderr);
 	exit(1);
 }
 
