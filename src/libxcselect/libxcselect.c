@@ -443,8 +443,20 @@ xcselect_get_version(void)
 /* ---- host SDK -------------------------------------------------------- */
 
 /*
- * The version this system reports, e.g. 15 for 15.3.  Read once, since
- * every call to xcselect_host_sdk_path wants it.
+ * The version this system reports, read once since every call to
+ * xcselect_host_sdk_path wants it.
+ *
+ * It is compared against the number in a "MacOSX10.<n>.sdk" name, and the
+ * shipped library does not read the number it is asking for.  It takes the
+ * product version as the string it is -- "26.5.2" -- and starts three bytes
+ * into it, so what it compares is "5.2" read as a number: the minor
+ * component, and 0 for a version too short to have one.  So on this system
+ * an SDK named MacOSX10.5.sdk matches and MacOSX10.26.sdk does not, which is
+ * the opposite of what the names suggest and is why the offset is spelled
+ * out here instead of being written as though it were a mistake.
+ *
+ * The buffer is cleared first because the offset can run past the end of a
+ * short version string, and what it finds there has to be a terminator.
  */
 static int
 host_version(void)
@@ -456,11 +468,12 @@ host_version(void)
 
 	if (!done) {
 		done = true;
+		memset(buf, 0, sizeof(buf));
 		if (sysctlbyname("kern.osproductversion", buf, &len, NULL, 0)
 		    == -1)
 			return 0;
 		buf[sizeof(buf) - 1] = '\0';
-		version = (int)strtol(buf, NULL, 10);
+		version = (int)strtol(buf + 3, NULL, 10);
 	}
 
 	return version;
