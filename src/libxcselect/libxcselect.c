@@ -60,6 +60,9 @@
 /* The other half of that test: the xcrun a directory of its own carries. */
 #define XCSELECT_XCRUN_SHIM	"usr/bin/xcrun"
 
+/* The toolchain a shipped developer directory is built around. */
+#define XCSELECT_DEFAULT_TOOLCHAIN "XcodeDefault.xctoolchain"
+
 /* The symlinks consulted, in order, for a directory someone has selected. */
 static const char * const dev_dir_links[] = {
 	"/var/select/developer_dir",
@@ -1199,29 +1202,106 @@ manpaths_add(xcselect_manpaths *mp, const char *path)
 }
 
 /*
+ * The manual page directories of a developer directory the toolchain
+ * shipped, asked of the libxcrun that ships with it.  That library knows
+ * the toolchain's own layout -- which platform is current, which SDK, and
+ * anything either has added -- and reports one directory at a time
+ * through a block, so nothing has to be guessed here.
+ *
+ * The call is
+ *
+ *	void xcrun_iter_manpaths(const char *devdir, const char *sysroot,
+ *	    void (^iter)(const char *path));
+ *
+ * which appears in no header, so the symbol is looked up by name.  Three
+ * outcomes are told apart, as the shipped library tells them: the library
+ * answered and the list is whatever it said, the library is there but does
+ * not offer the call and the fallback list stands in, or the library could
+ * not be opened at all, which is reported and leaves no list.
+ */
+typedef enum {
+	XCSELECT_MANPATHS_ASKED,	/* libxcrun gave the list */
+	XCSELECT_MANPATHS_FALLBACK,	/* it could not be asked */
+	XCSELECT_MANPATHS_NO_LIBRARY	/* and could not be opened */
+} manpaths_source;
+
+static manpaths_source
+manpaths_from_libxcrun(xcselect_manpaths *mp, const char *libxcrun,
+    const char *devdir, char *sysroot)
+{
+	typedef void (^iter_fn)(const char *);
+	iter_fn iter;
+	void (*iter_manpaths)(const char *, const char *, iter_fn);
+	void *handle;
+
+	if ((handle = dlopen(libxcrun, RTLD_LAZY | RTLD_LOCAL)) == NULL) {
+		fprintf(stderr, "%s: error: unable to load libxcrun (%s).\n",
+		    getprogname(), dlerror());
+		return XCSELECT_MANPATHS_NO_LIBRARY;
+	}
+
+	iter_manpaths = (void (*)(const char *, const char *, iter_fn))dlsym(
+	    handle, "xcrun_iter_manpaths");
+	if (iter_manpaths == NULL) {
+		dlclose(handle);
+		return XCSELECT_MANPATHS_FALLBACK;
+	}
+
+	iter = ^(const char *path) {
+		manpaths_add(mp, path);
+	};
+	iter_manpaths(devdir, sysroot, iter);
+
+	dlclose(handle);
+
+	return XCSELECT_MANPATHS_ASKED;
+}
+
+/*
+ * A developer directory the toolchain did not ship -- one of a build of
+ * ours, say -- has no platform tree to describe, so the shipped library
+ * falls back to the directories an older layout used, llvm-gcc among
+ * them.  These are named whether or not they exist, because a directory
+ * that is not there yet is still where its pages will go.
+ */
+static void
+manpaths_add_fallback(xcselect_manpaths *mp, const char *devdir)
+{
+	char path[PATH_MAX];
+
+	snprintf(path, sizeof(path), "%s/usr/share/man", devdir);
+	manpaths_add(mp, path);
+	snprintf(path, sizeof(path), "%s/usr/llvm-gcc-4.2/share/man", devdir);
+	manpaths_add(mp, path);
+	snprintf(path, sizeof(path), "%s/Toolchains/%s/usr/share/man", devdir,
+	    XCSELECT_DEFAULT_TOOLCHAIN);
+	manpaths_add(mp, path);
+}
+
+/*
  * The manual page directories belonging to a sysroot.  The shipped
  * library asks the developer directory's own libxcrun for these, so that
  * a toolchain which has moved or added pages of its own is described
- * accurately; the list below is what it falls back to, and what a
+ * accurately; the lists below are what it resolves to, and what a
  * developer directory without a libxcrun gets.
+ *
+ * sysroot is taken the way the shipped library takes it: the pages are
+ * those of the active developer directory, not of the sysroot.
  */
 xcselect_manpaths *
 xcselect_get_manpaths(char *sysroot)
 {
 	xcselect_manpaths *mp;
-	char devdir[XCSELECT_BUF_SIZE];
-	char path[PATH_MAX];
+	char devdir[XCSELECT_BUF_SIZE], path[PATH_MAX];
 	bool from_env, cltools, fallback;
 
 	/*
-	 * The shipped library refuses outright when the process is in an
-	 * App Sandbox, asking libSystem's __xpc_runtime_is_app_sandboxed.
-	 * That symbol is not exported by this macOS -- not by libSystem,
-	 * not by libxpc, and not findable through RTLD_DEFAULT -- so the
-	 * check is left out rather than approximated.  A sandboxed caller
-	 * is the one case where the two would differ.
+	 * As in xcselect_invoke_xcrun, the sandbox question is asked of
+	 * libSystem by name at run time, because the name the shipped
+	 * library imports cannot be linked against.
 	 */
-	(void)sysroot;
+	if (process_is_app_sandboxed())
+		return NULL;
 
 	if (!xcselect_get_developer_dir_path(devdir, sizeof(devdir), &from_env,
 	    &cltools, &fallback))
@@ -1230,14 +1310,27 @@ xcselect_get_manpaths(char *sysroot)
 	if ((mp = calloc(1, sizeof(*mp))) == NULL)
 		return NULL;
 
-	/* Based on the developer directory, never on sysroot. */
-	snprintf(path, sizeof(path), "%s/usr/share/man", devdir);
-	manpaths_add(mp, path);
-	snprintf(path, sizeof(path), "%s/usr/llvm-gcc-4.2/share/man", devdir);
-	manpaths_add(mp, path);
-	snprintf(path, sizeof(path),
-	    "%s/Toolchains/XcodeDefault.xctoolchain/usr/share/man", devdir);
-	manpaths_add(mp, path);
+	/*
+	 * Whether the toolchain shipped this directory is what decides where
+	 * the list comes from, and the libxcrun that a shipped one carries
+	 * is both the sign of that and the thing to ask.
+	 */
+	snprintf(path, sizeof(path), "%s/%s", devdir, XCSELECT_XCRUN);
+	if (path_exists(path)) {
+		switch (manpaths_from_libxcrun(mp, path, devdir, sysroot)) {
+		case XCSELECT_MANPATHS_ASKED:
+			break;
+		case XCSELECT_MANPATHS_FALLBACK:
+			manpaths_add_fallback(mp, devdir);
+			break;
+		case XCSELECT_MANPATHS_NO_LIBRARY:
+			free(mp->paths);
+			free(mp);
+			return NULL;
+		}
+	} else {
+		manpaths_add_fallback(mp, devdir);
+	}
 
 	return mp;
 }
@@ -1251,7 +1344,16 @@ xcselect_manpaths_get_num_paths(xcselect_manpaths *xcp)
 const char *
 xcselect_manpaths_get_path(xcselect_manpaths *xcp, uint32_t id)
 {
-	if (xcp == NULL || id > xcp->count)
+	/*
+	 * Two places answer differently from the shipped library, both out
+	 * of contract, and both about not reading what is not there.  It
+	 * dereferences a NULL list and faults; here that is reported.  And
+	 * it lets an id equal to the count name the slot past the last one,
+	 * which is one past this array and holds whatever the allocator
+	 * left behind; here that is reported too.  Every id the count
+	 * covers answers the same either way.
+	 */
+	if (xcp == NULL || id >= xcp->count)
 		return NULL;
 
 	return xcp->paths[id];
