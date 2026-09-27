@@ -46,23 +46,40 @@
 #define XCRUN_DEFAULT_DEVELOPER_DIR "/Library/Developer/CommandLineTools"
 #endif
 
-/**
- * @func usage -- Print helpful information about this tool.
- * @arg prog - name of this tool
+/*
+ * The help, laid out as the tool that ships it lays it out: the
+ * description wrapped in the source rather than by a formatter, and the
+ * long --install line left as it is written.  It goes to stderr even when
+ * it is all that was asked for, and asking for it is not an error.
  */
-static void usage(void)
+static const char usage_text[] =
+		"Usage: xcode-select [options]\n"
+		"\n"
+		"Print or change the path to the active developer directory. This directory\n"
+		"controls which tools are used for the Xcode command line tools (for example, \n"
+		"xcodebuild) as well as the BSD development commands (such as cc and make).\n"
+		"\n"
+		"Options:\n"
+		"  -h, --help                  print this help message and exit\n"
+		"  -p, --print-path            print the path of the active developer directory\n"
+		"  -s <path>, --switch <path>  set the path for the active developer directory\n"
+		"  --install                   open a dialog for installation of the command line developer tools\n"
+		"  -v, --version               print the xcode-select version\n"
+		"  -r, --reset                 reset to the default command line tools path\n";
+
+/**
+ * @func usage -- Print the help, after a complaint when there is one.
+ * @arg error - the complaint, or NULL when only the help was asked for
+ */
+static void usage(const char *error)
 {
 
-	fprintf(stderr,
-			"Usage: xcode-select -print-path\n"
-			"   or: xcode-select -switch <sdk_folder_path>\n"
-			"   or: xcode-select -version\n"
-			"Arguments:\n"
-			"   -print-path                     Prints the path of the current SDK folder\n"
-			"   -switch <xcode_folder_path>     Sets the path for the current SDK folder\n"
-			"   -version                        Prints xcode-select version information\n\n");
+	if (error != NULL)
+		fprintf(stderr, "xcode-select: error: %s\n", error);
 
-	exit(1);
+	fputs(usage_text, stderr);
+
+	exit((error != NULL) ? 1 : 0);
 }
 
 /**
@@ -202,27 +219,37 @@ static int set_developer_path(const char *path)
 
 int main(int argc, char *argv[])
 {
+	char complaint[PATH_MAX + 32];
 	int ch;
 	char *path = NULL;
 
 	if (argc < 2)
-		usage();
+		usage("no command option given");
 
-	static int help_f, version_f, switch_f, printpath_f;
-	help_f = version_f = switch_f = printpath_f = 0;
+	/* -h is answered where it is read, so it needs no flag of its own. */
+	static int version_f, switch_f, printpath_f, install_f, reset_f;
+	version_f = switch_f = printpath_f = install_f = reset_f = 0;
 
 	static struct option options[] = {
 		{ "help", no_argument, 0, 'h' },
 		{ "version", no_argument, 0, 'v' },
 		{ "switch", required_argument, 0, 's' },
 		{ "print-path", no_argument, 0, 'p' },
+		{ "install", no_argument, 0, 'I' },
+		{ "reset", no_argument, 0, 'r' },
 		{ NULL, 0, 0, 0 }
 	};
 
-	while ((ch = getopt_long_only(argc, argv, "hvs:p", options, NULL)) != (-1)) {
+	/*
+	 * A leading colon leaves the complaining to us, which is what decides
+	 * how it is worded: a missing argument is not an argument that is not
+	 * there, and the two are told apart here rather than by getopt.
+	 */
+	while ((ch = getopt_long_only(argc, argv, ":hvprIs:", options,
+	    NULL)) != (-1)) {
 		switch (ch) {
 			case 'h':
-				help_f = 1;
+				usage(NULL);
 				break;
 			case 'v':
 				version_f = 1;
@@ -234,27 +261,58 @@ int main(int argc, char *argv[])
 			case 'p':
 				printpath_f = 1;
 				break;
-			case '?':
+			case 'I':
+				install_f = 1;
+				break;
+			case 'r':
+				reset_f = 1;
+				break;
+			case ':':
+				snprintf(complaint, sizeof(complaint),
+				    "missing argument to '%s'", argv[optind - 1]);
+				usage(complaint);
 			default:
-				help_f = 1;
+				snprintf(complaint, sizeof(complaint),
+				    "invalid argument '%s'", argv[optind - 1]);
+				usage(complaint);
 		}
 	}
 
-	if (help_f == 1)
-		usage();
+	/* Anything left over is an operand, and this tool takes none. */
+	if (optind < argc) {
+		snprintf(complaint, sizeof(complaint), "invalid argument '%s'",
+		    argv[optind]);
+		usage(complaint);
+	}
 
 	if (version_f == 1)
 		version();
 
+	if (install_f == 1) {
+		xcselect_trigger_install_request("xcode-select");
+		return 0;
+	}
+
+	if (reset_f == 1) {
+		/* Back to the default command line tools path. */
+		if (validate_directory_path(XCRUN_DEFAULT_DEVELOPER_DIR) == 0)
+			return set_developer_path(XCRUN_DEFAULT_DEVELOPER_DIR) == 0 ? 0 : 1;
+		fprintf(stderr, "xcode-select: error: unable to determine the"
+		    " default developer directory.\n");
+		return 1;
+	}
+
 	if (switch_f == 1) {
 		if (validate_directory_path(path) == 0)
-			return set_developer_path(path);
+			return set_developer_path(path) == 0 ? 0 : 1;
 		else
-			return -1;
+			return 1;
 	}
 
 	if (printpath_f == 1) {
 		path = get_developer_path();
+		if (path == NULL)
+			return 1;
 		fprintf(stdout, "%s\n", path);
 	}
 
