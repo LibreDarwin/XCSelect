@@ -71,6 +71,7 @@
 #include <sysexits.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include "ini.h"
 #include <stdbool.h>
@@ -87,7 +88,8 @@
 #include <Block.h>
 
 /* General stuff */
-#define TOOL_VERSION "1.0.0"
+/* What the shipped library reports, e.g. "xcrun version 72." */
+#define TOOL_VERSION "72."
 #define SDK_CFG ".xcdev.dat"
 #ifndef XCRUN_DEFAULT_CFG
 #define XCRUN_DEFAULT_CFG "/usr/local/etc/xcrun.ini"
@@ -160,14 +162,6 @@ static void (^unknown_utility_handler)(const char *) = NULL;
 /* Alternate behavior flags */
 static char *alternate_sdk_path = NULL;
 static char *alternate_toolchain_path = NULL;
-
-/* Ways that this tool may be called */
-static const char *multicall_tool_names[4] = {
-	"xcrun",
-	"xcrun_log",
-	"xcrun_verbose",
-	"xcrun_nocache"
-};
 
 /* Our program's name as called by the user */
 static char *progname;
@@ -338,6 +332,36 @@ static void usage(int status)
 }
 
 /**
+ * @func no_utility_named -- report a run that names no tool
+ *
+ * Every way of asking to be run or looked up without saying which tool
+ * gets the same answer, whatever option was used: -f, -r, -l, -v and -n
+ * all say the utility was not named, and all of them print the usage after
+ * it.  An option that takes a value instead says the argument is missing,
+ * because the thing that is missing is the argument rather than the tool.
+ */
+static void no_utility_named(void)
+{
+	fprintf(stderr, "%s: error: no utility name specified\n", progname);
+	usage(EX_USAGE);
+}
+
+/**
+ * @func no_such_utility -- report a tool that could not be found
+ *
+ * The same message whether the tool was to be printed or run: the answer
+ * is that there is no such utility, which is not a usage mistake, so it
+ * exits EX_OSFILE rather than EX_USAGE.  The sh -c line above it has
+ * already said what was tried.
+ */
+static void no_such_utility(const char *name)
+{
+	fprintf(stderr, "%s: error: unable to find utility \"%s\", not a developer tool or in PATH\n",
+	    progname, name);
+	exit(EX_OSFILE);
+}
+
+/**
  * @func version -- print out version info for this tool
  */
 static void version(void)
@@ -349,23 +373,38 @@ static void version(void)
 /**
  * @func validate_directory_path -- validate if requested directory path exists
  * @arg dir - directory to validate
- * @return: 0 on success, -1 on failure
+ * @return: 0 on success, -1 on failure, with errno left describing why
+ *
+ * Silent: the caller knows better than this whether a path it cannot
+ * resolve is worth telling the user about, and saying it twice is worse
+ * than not saying it at all.
  */
 static int validate_directory_path(const char *dir)
 {
 	struct stat fstat;
-	int retval = -1;
 
 	if (stat(dir, &fstat) != 0)
-		fprintf(stderr, "xcrun: error: unable to validate path \'%s\' (errno=%s)\n", dir, strerror(errno));
-	else {
-		if (S_ISDIR(fstat.st_mode) == 0)
-			fprintf(stderr, "xcrun: error: \'%s\' is not a valid path\n", dir);
-		else
-			retval = 0;
-	}
+		return -1;
 
-	return retval;
+	return S_ISDIR(fstat.st_mode) ? 0 : -1;
+}
+
+/**
+ * @func devdir_has_toolchains -- whether the developer dir keeps toolchains
+ *
+ * A full developer dir holds a Toolchains directory, and an SDK is resolved
+ * through the toolchain that owns it.  The flat Command Line Tools layout
+ * has no such directory: its SDKs and its tools stand on their own, with no
+ * toolchain in between.  What a missing SDK costs therefore differs by
+ * layout, and this is the difference being asked about.
+ */
+static int
+devdir_has_toolchains(void)
+{
+	char buf[PATH_MAX];
+
+	snprintf(buf, sizeof(buf), "%s/Toolchains", developer_dir);
+	return validate_directory_path(buf) == 0;
 }
 
 /**
@@ -523,7 +562,15 @@ static char *default_sdk_name(void)
 	if (config.sdk != NULL && *config.sdk != '\0')
 		return strdup(config.sdk);
 
-	if ((name = xt_first_sdk_name(developer_dir)) != NULL) {
+	/*
+	 * The default is a path, not a name, on purpose.  A stock Xcode has
+	 * MacOSX.sdk, MacOSX26.5.sdk and MacOSX26.sdk all answering to
+	 * macosx26.5, and a name handed back to xt_find_sdk comes to be
+	 * resolved to whichever of those the search prefers -- the versioned
+	 * one -- where the shipped xcrun reports MacOSX.sdk.  Resolving once,
+	 * here, keeps the answer.
+	 */
+	if ((name = xt_default_sdk_path(developer_dir)) != NULL) {
 		verbose_printf(stdout, "xcrun: info: no configured sdk; using \'%s\'.\n", name);
 		return name;
 	}
@@ -537,36 +584,43 @@ static char *default_sdk_name(void)
  * @func default_toolchain_name -- toolchain to use when none was requested
  *
  * As above, with XcodeDefault as the last resort: it is the name a stock
- * toolchain carries, and the one our own bundles emit.
+ * toolchain carries, and the one our own bundles emit.  It is returned
+ * whether or not a toolchain by that name is installed, since the name only
+ * has to be conventional -- an unresolvable one is reported at the path it
+ * would occupy rather than refused, and the Command Line Tools have no
+ * toolchain directory at all.
  *
  * @return: toolchain name
  */
 static char *default_toolchain_name(void)
 {
 	default_config config = get_default_info(default_cfg_path());
-	char *path;
 
 	if (config.toolchain != NULL && *config.toolchain != '\0')
 		return strdup(config.toolchain);
 
-	if ((path = xt_find_toolchain(developer_dir, "XcodeDefault")) != NULL) {
-		free(path);
-		return strdup("XcodeDefault");
-	}
-
-	fprintf(stderr, "xcrun: error: no toolchain configured and none found in '%s'.\n",
-		developer_dir != NULL ? developer_dir : "(unset)");
-	exit(1);
+	return strdup("XcodeDefault");
 }
 
 /**
  * @func get_toolchain_path -- Return the specified toolchain path
  * @arg name - name of the toolchain
- * @return: absolute path of toolchain on success, exit on failure
+ * @return: absolute path of toolchain
+ *
+ * A toolchain that is not installed is still reported at the path it would
+ * occupy.  The Command Line Tools ship no Toolchains directory at all, and
+ * xcrun --show-toolchain-path answers
+ * <dev>/Toolchains/XcodeDefault.xctoolchain there anyway; a name that
+ * cannot be resolved does not fail either, since the answer only ever goes
+ * into a PATH, where a directory that is not there contributes nothing.
+ * An installed toolchain is preferred, so a directory that happens to be
+ * there with the older suffix is found rather than guessed at.
  */
 static char *get_toolchain_path(const char *name)
 {
 	char *path = NULL;
+	size_t e;
+	char buf[PATH_MAX];
 
 	if (developer_dir == NULL) {
 		fprintf(stderr, "xcrun: error: failed to retrieve developer path, do you have it set?\n");
@@ -577,6 +631,13 @@ static char *get_toolchain_path(const char *name)
 	if ((path = xt_find_toolchain(developer_dir, name)) != NULL)
 		return path;
 
+	for (e = 0; toolchain_exts[e] != NULL; e++) {
+		snprintf(buf, sizeof(buf), "%s/Toolchains/%s%s",
+		    developer_dir, name, toolchain_exts[e]);
+		return strdup(buf);
+	}
+
+	/* Unreachable: toolchain_exts is not empty. */
 	fprintf(stderr, "xcrun: error: \'%s\' is not a valid toolchain name in \'%s\'.\n",
 		name, developer_dir);
 	exit(1);
@@ -627,12 +688,38 @@ static char *get_sdk_path(const char *name)
 	/*
 	 * Apple keeps SDKs inside their platform bundle; the older flat
 	 * <dev>/SDKs/<name>.sdk is still accepted.  See sdkpath.c.
+	 *
+	 * An absolute path is taken as the SDK itself rather than as a name
+	 * to look up.  That is how an explicit "-sdk /path/to/SDK.sdk" is
+	 * meant to work, and it is also what the default comes back as: the
+	 * default is resolved to a path already, because several bundles can
+	 * answer to one name and looking it up a second time would pick a
+	 * different one.
+	 *
+	 * A path that is not there is still carried on with rather than
+	 * refused: the option that named it has already said so, and the
+	 * tool lookup that follows is what decides whether the SDK being
+	 * unusable matters.  A tool that does not need one still runs.
 	 */
-	if ((path = xt_find_sdk(developer_dir, name)) != NULL)
+	if (*name == '/') {
+		validate_directory_path(name);
+		return strdup(name);
+	} else if ((path = xt_find_sdk(developer_dir, name)) != NULL)
 		return path;
 
-	fprintf(stderr, "xcrun: error: \'%s\' is not a valid sdk name in \'%s\'.\n",
-		name, developer_dir);
+	/*
+	 * A name that names no SDK.  Apple reports the SDK as not located
+	 * and then the item it could not look up in it, and where toolchains
+	 * are kept the locating is xcodebuild's -- with a result bundle and a
+	 * timestamp on every line, so that half is not reproduced here.
+	 */
+	if (devdir_has_toolchains()) {
+		fprintf(stderr, "xcrun: error: unable to lookup item 'Path' in SDK '%s'\n", name);
+	} else {
+		fprintf(stderr, "xcrun: error: SDK \"%s\" cannot be located\n", name);
+		fprintf(stderr, "xcrun: error: SDK \"%s\" cannot be located\n", name);
+		fprintf(stderr, "xcrun: error: unable to lookup item 'Path' in SDK '%s'\n", name);
+	}
 	exit(1);
 }
 
@@ -864,7 +951,8 @@ static char *search_command(const char *name, char *dirs)
 	char delimiter[2] = ":";	/* delimiter for directories in dirs argument */
 
 	/* Allocate space for the program's absolute path */
-	cmd = (char *)malloc(PATH_MAX - 1);
+	if ((cmd = (char *)malloc(PATH_MAX - 1)) == NULL)
+		return NULL;
 
 	/* Search each path entry in dirs until we find our program. */
 	absl_path = strtok(dirs, delimiter);
@@ -872,19 +960,26 @@ static char *search_command(const char *name, char *dirs)
 		verbose_printf(stdout, "xcrun: info: checking directory \'%s\' for command \'%s\'...\n", absl_path, name);
 
 		/* Construct our program's absolute path. */
-		sprintf(cmd, "%s/%s", absl_path, name);
+		snprintf(cmd, PATH_MAX - 1, "%s/%s", absl_path, name);
 
 		/* Does it exist? Is it an executable? */
 		if (access(cmd, (F_OK | X_OK)) != (-1)) {
 			verbose_printf(stdout, "xcrun: info: found command's absolute path: \'%s\'\n", cmd);
-			break;
+			return cmd;
 		}
 
 		/* If not, move onto the next entry.. */
 		absl_path = strtok(NULL, delimiter);
 	}
 
-	return cmd;
+	/*
+	 * Every entry was looked at and none of them had it.  Returning the
+	 * last path tried instead would have the caller try to run a file
+	 * that was never there, and report it as an exec failure.
+	 */
+	free(cmd);
+
+	return NULL;
 }
 
 /**
@@ -913,12 +1008,131 @@ static char *sdk_toolchain_name(const char *sdkpath)
 	return strdup((name != NULL) ? name : "");
 }
 
+static int request_command(const char *name, int argc, char *argv[]);
+
+/*
+ * A tool can live somewhere our own search does not look -- in a system
+ * directory, or a per-user one -- and the shipped xcrun still finds it.  It
+ * does that by asking the toolchain's xcodebuild, which knows the full set of
+ * places a tool can be installed, and printing whatever path comes back.  The
+ * shipped library runs it as
+ *
+ *   sh -c '<devdir>/usr/bin/xcodebuild -sdk <sdkpath> -find <tool> 2> /dev/null'
+ *
+ * and reports a failure as
+ *
+ *   xcrun: error: sh -c '...' failed with exit code <n>: (null) (errno=...)
+ *
+ * followed by
+ *
+ *   xcrun: error: unable to find utility "<tool>", not a developer tool or in PATH
+ *
+ * which is why the command is spelled out in the message: it is the only
+ * record of what was actually tried.  We do the same rather than inventing a
+ * longer list of directories, because the toolchain's answer is the one that
+ * matches what the toolchain will actually run.
+ *
+ * @return: malloc'd path, or NULL when the tool cannot be found
+ */
+static char *xcodebuild_find_path(const char *name)
+{
+	char *xcodebuild = NULL;
+	char *sdk = NULL;
+	char *cmd = NULL;
+	char *shcmd = NULL;
+	char *line = NULL;
+	char *path = NULL;
+	size_t linecap = 0;
+	FILE *fp;
+	int status;
+
+	if (developer_dir == NULL)
+		return NULL;
+
+	if (asprintf(&xcodebuild, "%s/usr/bin/xcodebuild", developer_dir) == -1)
+		return NULL;
+	if (access(xcodebuild, (F_OK | X_OK)) == -1) {
+		free(xcodebuild);
+		return NULL;
+	}
+
+	/*
+	 * -sdk is given the resolved SDK path, not the name, so an explicit
+	 * --sdk is honoured the same way it is for the searches above.  A
+	 * --sdk that named a path is that path either way, resolved or not:
+	 * handing xcodebuild the default instead would answer a question
+	 * about the SDK that was asked about with a different one.
+	 */
+	if (alternate_sdk_path != NULL) {
+		if (asprintf(&sdk, "%s", alternate_sdk_path) == -1)
+			return NULL;
+	} else {
+		sdk = get_sdk_path(current_sdk);
+	}
+	if (asprintf(&cmd, "%s -sdk %s -find %s 2> /dev/null", xcodebuild, sdk, name) == -1) {
+		free(sdk);
+		free(xcodebuild);
+		return NULL;
+	}
+
+	/* The message quotes the whole thing, so keep the two apart. */
+	if (asprintf(&shcmd, "sh -c '%s'", cmd) == -1) {
+		free(cmd);
+		free(sdk);
+		free(xcodebuild);
+		return NULL;
+	}
+
+	/*
+	 * Reported as 0 unless something here sets it, which is what the
+	 * shipped library does: it is the exit code that says what went
+	 * wrong, and errno only says so when it was the reason.  An SDK
+	 * that is not there is such a reason, and is reported as the errno
+	 * from looking for it rather than as nothing at all.
+	 */
+	errno = validate_directory_path(sdk) == (-1) ? ENOENT : 0;
+
+	if ((fp = popen(shcmd, "r")) != NULL) {
+		ssize_t len = getline(&line, &linecap, fp);
+		int cstatus = pclose(fp);
+
+		/* xcodebuild exits 70 for a tool it could not find. */
+		if (len > 0 && WIFEXITED(cstatus) && WEXITSTATUS(cstatus) == 0) {
+			while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+				line[--len] = '\0';
+			if (len > 0)
+				path = strdup(line);
+		}
+		if (path == NULL) {
+			/*
+			 * The status is reported as pclose hands it back,
+			 * exit code shifted into the high half rather than
+			 * unpacked from it: a tool xcodebuild will not name
+			 * exits 69 and is reported as 17664.
+			 */
+			status = cstatus;
+			fprintf(stderr, "xcrun: error: sh -c \'%s\' failed with exit code %d: (null) (errno=%s)\n",
+			    cmd, status, strerror(errno));
+		}
+	}
+
+	free(line);
+	free(shcmd);
+	free(cmd);
+	free(sdk);
+	free(xcodebuild);
+
+	return path;
+}
+
 static int request_command(const char *name, int argc, char *argv[])
 {
 	char *cmd = NULL;	/* used to hold our command's absolute path */
 	char *sdk_env = NULL;	/* used for passing SDKROOT in call_command */
 	char *toolch_name = NULL;	/* toolchain name to be used with sdk */
 	char *toolchain_env = NULL;	/* used for passing PATH in call_command */
+	char *path_env = NULL;	/* the caller's PATH, searched last */
+	int narrow_to_sdk_only = 0;	/* an SDK nothing resolves leaves nothing */
 	char search_string[PATH_MAX * 1024];	/* our search string */
 
 	/*
@@ -942,64 +1156,133 @@ static int request_command(const char *name, int argc, char *argv[])
 			current_toolchain = default_toolchain_name();
 	}
 
-	/* No matter the circumstance, search the developer dir. */
-	sprintf(search_string, "%s/usr/bin:", developer_dir);
+	/*
+	 * Tools come from the toolchain, then the developer dir, then the
+	 * caller's PATH.  The order matters: a real installation keeps shims
+	 * in the developer dir that stand in for the toolchain's tools, and
+	 * Apple resolves the toolchain's copy ahead of them.
+	 *
+	 * The SDK is deliberately not a source of tools.  Its usr/bin holds
+	 * the *-config helper scripts, and those are shadowed by the copies
+	 * in /usr/bin -- naming the SDK on the command line does not change
+	 * that, so an SDK's own cups-config is never the one that runs.
+	 */
+	search_string[0] = '\0';
 
-	/* If we implicitly specified an sdk, search the sdk and it's associated toolchain. */
 	if (explicit_sdk_mode == 1) {
+		/*
+		 * The toolchain the SDK belongs to, and only that one.  An
+		 * SDK naming no toolchain of its own falls back to the
+		 * default, but one that is not there at all brings none:
+		 * a developer dir that has a toolchain is not a reason to
+		 * answer for an SDK that was asked for by name.
+		 */
 		toolch_name = sdk_toolchain_name(get_sdk_path(current_sdk));
-		sprintf((search_string + strlen(search_string)), "%s/usr/bin:%s/usr/bin", get_sdk_path(current_sdk), get_toolchain_path(toolch_name));
-		goto do_search;
-	}
-
-	/* If we implicitly specified a toolchain, only search the toolchain. */
-	if (explicit_toolchain_mode == 1) {
-		sprintf((search_string + strlen(search_string)), "%s/usr/bin", get_toolchain_path(current_toolchain));
-		goto do_search;
-	}
-
-	/* If we explicitly specified an SDK, append it to the search string. */
-	if (alternate_sdk_path != NULL) {
-		sprintf((search_string + strlen(search_string)), "%s/usr/bin:", alternate_sdk_path);
+		if (toolch_name == NULL && validate_directory_path(get_sdk_path(current_sdk)) != (-1))
+			toolch_name = current_toolchain;
+		if (toolch_name != NULL)
+			sprintf(search_string, "%s/usr/bin", get_toolchain_path(toolch_name));
+	} else if (explicit_toolchain_mode == 1) {
+		sprintf(search_string, "%s/usr/bin", get_toolchain_path(current_toolchain));
+	} else if (alternate_sdk_path != NULL && validate_directory_path(alternate_sdk_path) == (-1)) {
+		/*
+		 * An SDK named by a path that is not there brings no toolchain
+		 * with it, and where toolchains are kept that takes the
+		 * developer dir's own tools and the caller's PATH out of the
+		 * search too: the SDK asked for is what names the tools, so
+		 * none is left but xcodebuild, and the tool is reported
+		 * missing.  The flat Command Line Tools layout resolves no SDK
+		 * through a toolchain, so there its usr/bin still answers.
+		 */
+		if (devdir_has_toolchains())
+			narrow_to_sdk_only = 1;
+	} else if (alternate_sdk_path != NULL && test_sdk_authenticity(alternate_sdk_path) == 1) {
 		/* We also want to append an associated toolchain if this is really an SDK folder. */
-		if (test_sdk_authenticity(alternate_sdk_path) == 1) {
-			toolch_name = sdk_toolchain_name(alternate_sdk_path);
-			sprintf((search_string + strlen(search_string)), "%s/usr/bin", get_toolchain_path(toolch_name));
-			/* We now have a toolchain, so skip to search. */
-			goto do_search;
-		}
+		toolch_name = sdk_toolchain_name(alternate_sdk_path);
+		if (toolch_name != NULL)
+			sprintf(search_string, "%s/usr/bin", get_toolchain_path(toolch_name));
+		else
+			sprintf(search_string, "%s/usr/bin", get_toolchain_path(current_toolchain));
+	} else if (alternate_toolchain_path != NULL) {
+		sprintf(search_string, "%s/usr/bin", alternate_toolchain_path);
+	} else {
+		sprintf(search_string, "%s/usr/bin", get_toolchain_path(current_toolchain));
 	}
 
-	/* If we explicitly specified a toolchain, append it to the search string. */
-	if (alternate_toolchain_path != NULL)
-		sprintf((search_string + strlen(search_string)), "%s/usr/bin", alternate_toolchain_path);
+	/* Then the developer dir, which is where the non-toolchain tools live. */
+	if (!narrow_to_sdk_only) {
+		if (search_string[0] != '\0')
+			strncat(search_string, ":", (sizeof(search_string) - strlen(search_string) - 1));
+		sprintf((search_string + strlen(search_string)), "%s/usr/bin", developer_dir);
+	}
 
-	/* By default, we search our developer dir, our default sdk, and our default toolchain only. */
-	if (explicit_sdk_mode == 0 && explicit_toolchain_mode == 0 && alternate_toolchain_path == NULL && alternate_sdk_path == NULL)
-		sprintf((search_string + strlen(search_string)), "%s/usr/bin:%s/usr/bin", get_sdk_path(current_sdk), get_toolchain_path(current_toolchain));
+	/* And last of all the caller's PATH, which is where a system tool stays a system tool. */
+	if (!narrow_to_sdk_only && (path_env = getenv("PATH")) != NULL) {
+		strncat(search_string, ":", (sizeof(search_string) - strlen(search_string) - 1));
+		strncat(search_string, path_env, (sizeof(search_string) - strlen(search_string) - 1));
+	}
 
 	/* Search each path entry in search_string until we find our program. */
-do_search:
 	if ((cmd = search_command(name, search_string)) != NULL) {
 		if (finding_mode == 1) {
-			if (access(cmd, (F_OK | X_OK)) != (-1)) {
-				fprintf(stdout, "%s\n", cmd);
-				free(cmd);
-				return 0;
-			} else
-				return -1;
-		} else {
-			call_command(cmd, argc, argv);
-			/* NOREACH */
-			fprintf(stderr, "xcrun: error: can't exec \'%s\' (errno=%s)\n", cmd, strerror(errno));
-			return -1;
+			fprintf(stdout, "%s\n", cmd);
+			free(cmd);
+			return 0;
 		}
+		call_command(cmd, argc, argv);
+		/* NOREACH */
+		fprintf(stderr, "xcrun: error: can't exec \'%s\' (errno=%s)\n", cmd, strerror(errno));
+		return -1;
 	}
 
-	/* We have searched everywhere, but we haven't found our program. State why. */
-	fprintf(stderr, "xcrun: error: can't stat \'%s\' (errno=%s)\n", name, strerror(errno));
-
+	/*
+	 * None of the directories had it.  Nothing is said here: the caller
+	 * goes on to ask the toolchain, and if that cannot name it either,
+	 * the message it prints is the one that explains the failure.  A
+	 * line here would only be a guess at which of the two happened.
+	 */
 	return -1;
+}
+
+static int xcrun_parse_args(int argc, char *argv[]);
+
+/**
+ * @func xcrun_parse_xcrun_args -- hand the user's arguments to the parser
+ * @arg argc - number of arguments passed by user, not counting xcrun itself
+ * @arg argv - array of arguments passed by user, already without xcrun
+ * @arg progname - the name to report in messages
+ * @return: 0 (or none) on success, 1 on failure
+ *
+ * Our callers hand us argc - 1 and argv + 1, so argv[0] is the first
+ * argument the user gave and no program name is present at all.  The parser
+ * wants the usual C shape, with argv[0] naming the program, because
+ * getopt_long_only unconditionally skips argv[0] when it looks for
+ * options.  Hand it the shifted array unchanged and the first option is
+ * mistaken for the program name, nothing is parsed, and the option itself
+ * is then run as a tool.  Put the name back rather than rewrite the parser
+ * to count differently from every other getopt caller.
+ */
+static int xcrun_parse_xcrun_args(int argc, char *argv[], char *progname)
+{
+	char **args;
+	int i, retval;
+
+	args = (char **)malloc(sizeof(char *) * (size_t)(argc + 2));
+	if (args == NULL) {
+		fprintf(stderr, "xcrun: error: failed to allocate memory\n");
+		exit(1);
+	}
+
+	args[0] = progname;
+	for (i = 0; i < argc; i++)
+		args[i + 1] = argv[i];
+	args[argc + 1] = NULL;
+
+	retval = xcrun_parse_args(argc + 1, args);
+
+	free(args);
+
+	return retval;
 }
 
 /**
@@ -1105,10 +1388,20 @@ static int xcrun_parse_args(int argc, char *argv[])
 								sdk = optarg;
 								/* we support absolute paths and short names */
 								if (*sdk == '/') {
-									if (validate_directory_path(sdk) != (-1))
-										alternate_sdk_path = sdk;
-									else
-										exit(1);
+									/*
+									 * A path is taken as the SDK it is
+									 * whether or not anything can be read
+									 * from it.  One that is not there is
+									 * said so where a toolchain would
+									 * have resolved it, which is where
+									 * the flat layout has nothing to
+									 * resolve through and stays quiet.
+									 */
+									if (validate_directory_path(sdk) == (-1) &&
+									    devdir_has_toolchains())
+										fprintf(stderr, "xcrun: error: Failed to determine realpath of '%s' (errno=%s)\n",
+										    sdk, strerror(errno));
+									alternate_sdk_path = sdk;
 								} else {
 									current_sdk = (char *)malloc(XCRUN_NAME_MAX);
 									explicit_sdk_mode = 1;
@@ -1123,13 +1416,11 @@ static int xcrun_parse_args(int argc, char *argv[])
 							if (*optarg != '-') {
 								++argc_offset;
 								toolchain = optarg;
-								/* we support absolute paths and short names */
-								if (*toolchain == '/') {
-									if (validate_directory_path(toolchain) != (-1))
-										alternate_toolchain_path = toolchain;
-									else
-										exit(1);
-								} else {
+							/* we support absolute paths and short names */
+							if (*toolchain == '/') {
+								/* Said once, then used anyway, as for --sdk. */
+								alternate_toolchain_path = toolchain;
+							} else {
 									current_toolchain = (char *)malloc(XCRUN_NAME_MAX);
 									explicit_toolchain_mode = 1;
 									stripext(current_toolchain, XCRUN_NAME_MAX, toolchain,
@@ -1152,11 +1443,23 @@ static int xcrun_parse_args(int argc, char *argv[])
 							break;
 					}
 					break;
-				case ':':
-					fprintf(stderr, "%s: error: argument to '%s'"
-					    " is missing\n", progname,
-					    argv[optind - 1]);
+			case ':':
+				/*
+				 * An option that takes a tool name asks for
+				 * the tool by name of what it is missing, not
+				 * by the option that wanted it: -f, -r and --sdk
+				 * are all a missing utility, and xcrun says so
+				 * the same way for each.
+				 */
+				if (optopt == 'f' || optopt == 'r') {
+					fprintf(stderr, "%s: error: no utility name specified\n",
+					    progname);
 					usage(EX_USAGE);
+				}
+				fprintf(stderr, "%s: error: argument to '%s'"
+				    " is missing\n", progname,
+				    argv[optind - 1]);
+				usage(EX_USAGE);
 				case '?':
 				default:
 					fprintf(stderr, "%s: error: unrecognized"
@@ -1183,11 +1486,16 @@ static int xcrun_parse_args(int argc, char *argv[])
 		++argc_offset;
 	}
 
-	/* Don't continue if we are missing arguments. */
-	if ((verbose_f == 1 || log_f == 1) && tool_called == NULL) {
-		fprintf(stderr, "xcrun: error: specified arguments require -r or -f arguments.\n");
-		exit(1);
-	}
+	/*
+	 * An option that means "do something to this tool" is incomplete
+	 * without the tool, and is answered before any SDK is worked out.
+	 * -k is the exception: it only ever clears the cache, so it is
+	 * complete on its own.
+	 */
+	if (tool_called == NULL &&
+	    (verbose_f == 1 || log_f == 1 || nocache_f == 1 ||
+	     find_f == 1 || run_f == 1))
+		no_utility_named();
 
 	/* Print version? */
 	if (version_f == 1)
@@ -1243,8 +1551,16 @@ static int xcrun_parse_args(int argc, char *argv[])
 			char *platform = xt_sdk_platform_path(get_sdk_path(current_sdk));
 
 			if (platform == NULL) {
-				fprintf(stderr, "xcrun: error: SDK '%s' is not inside a platform.\n",
-					current_sdk);
+				/*
+				 * The Command Line Tools keep their SDKs outside
+				 * any platform bundle, so there is no platform to
+				 * name -- which is what this says, rather than
+				 * complaining about the SDK.  Apple then goes on to
+				 * say that too, so that the SDK it did consult is
+				 * named either way.
+				 */
+				fprintf(stderr, "xcrun: error: unable to lookup item 'PlatformPath' from command line tools installation\n");
+				fprintf(stderr, "xcrun: error: unable to lookup item 'PlatformPath' in SDK '%s'\n", get_sdk_path(current_sdk));
 				exit(1);
 			}
 
@@ -1269,8 +1585,8 @@ static int xcrun_parse_args(int argc, char *argv[])
 			}
 
 			if (version == NULL) {
-				fprintf(stderr, "xcrun: error: no platform version for SDK '%s'.\n",
-					current_sdk);
+				fprintf(stderr, "xcrun: error: unable to lookup item 'PlatformVersion' from command line tools installation\n");
+				fprintf(stderr, "xcrun: error: unable to lookup item 'PlatformVersion' in SDK '%s'\n", get_sdk_path(current_sdk));
 				exit(1);
 			}
 
@@ -1303,62 +1619,61 @@ static int xcrun_parse_args(int argc, char *argv[])
 
 	/* Before we continue, double check if we have a tool to call. */
 	if (tool_called == NULL) {
-		fprintf(stderr, "xcrun: error: no tool specified.\n");
-		exit(1);
+		/* -k asked only for the cache to be cleared; that is done. */
+		if (killcache_f == 1)
+			exit(0);
+		no_utility_named();
 	}
 
 	/* Search for program? */
 	if (find_f == 1) {
+		char *path;
+
 		finding_mode = 1;
 		if (request_command(tool_called, 0, NULL) != -1)
 			retval = 0;
-		else {
-			fprintf(stderr, "xcrun: error: unable to locate command \'%s\' (errno=%s)\n", tool_called, strerror(errno));
-			exit(1);
-		}
+		else if ((path = xcodebuild_find_path(tool_called)) != NULL) {
+			fprintf(stdout, "%s\n", path);
+			free(path);
+			retval = 0;
+		} else
+			no_such_utility(tool_called);
 	}
 
 	/* Search and execute program. (default behavior) */
 	if (find_f != 1) {
-			if (request_command(tool_called, (argc - argc_offset),  (argv += ((argc - argc_offset) - (argc - argc_offset) + (argc_offset)))) != -1)
-				retval = -1; /* NOREACH */
-			else {
-				fprintf(stderr, "xcrun: error: failed to execute command \'%s\'.\n", tool_called);
-				/*
-				 * A caller that is not xcrun itself decides what
-				 * an unknown tool means, and has said so by
-				 * registering a handler for it.  libxcrun owns
-				 * the exit either way.
-				 */
-				if (unknown_utility_handler != NULL)
-					unknown_utility_handler(tool_called);
-				else
-					fprintf(stderr, "xcrun: error: aborting.\n");
+		char *path;
+
+		if (request_command(tool_called, (argc - argc_offset),  (argv += ((argc - argc_offset) - (argc - argc_offset) + (argc_offset)))) != -1)
+			retval = -1; /* NOREACH */
+		/*
+		 * Not in any of the directories searched above, but the
+		 * toolchain may still know of it, and the shipped xcrun
+		 * runs it from wherever that answer points.
+		 */
+		else if ((path = xcodebuild_find_path(tool_called)) != NULL) {
+			call_command(path, argc - argc_offset, argv);
+			/* NOREACH */
+			fprintf(stderr, "xcrun: error: can't exec \'%s\' (errno=%s)\n", path, strerror(errno));
+			exit(1);
+		}
+		else {
+			/*
+			 * A caller that is not xcrun itself decides what
+			 * an unknown tool means, and has said so by
+			 * registering a handler for it.  libxcrun owns
+			 * the exit either way.
+			 */
+			if (unknown_utility_handler != NULL) {
+				unknown_utility_handler(tool_called);
 				exit(1);
 			}
+			no_such_utility(tool_called);
 		}
+	}
 
 		/* The shipped library exits here rather than returning. */
 		exit(retval);
-}
-
-/**
- * @func get_multicall_state -- Return a number that is associated to a given multicall state.
- * @arg cmd - command that binary is being called
- * @arg state - char array containing a set of possible "multicall states"
- * @arg state_size - number of elements in state array
- * @return: a number from 1 to state_size (first enrty to last entry found in state array), or -1 if one isn't found
- */
-static int get_multicall_state(const char *cmd, const char *state[], int state_size)
-{
-	int i;
-
-	for (i = 0; i < (state_size - 1); i++) {
-		if (strcmp(cmd, state[i]) == 0)
-			return (i + 1);
-	}
-
-	return -1;
 }
 
 /**
@@ -1436,12 +1751,12 @@ xcrun_iter_manpaths(const char *devdir, const char *sysroot,
 	 *
 	 * Note the SDK is MacOSX.sdk, the same one the shipped library picks
 	 * as the default SDK -- see cltools_lookup_sdk_by_key in
-	 * local/xcselect.md.  Naming the default rather than the canonical
-	 * version is the point: our xt_first_sdk_name currently prefers the
-	 * bundle named for its canonical name, which resolves to
-	 * MacOSX26.5.sdk and is the remaining --show-sdk-path difference.
+	 * local/xcselect.md.  Naming the default rather than looking one up
+	 * by name is the point: a name lookup resolves away to whichever
+	 * bundle carries the canonical name, and in a stock Xcode that is
+	 * MacOSX26.5.sdk.
 	 */
-	if ((sdk = xt_find_sdk(devdir, "MacOSX")) != NULL) {
+	if ((sdk = xt_default_sdk_path(devdir)) != NULL) {
 		snprintf(path, sizeof(path), "%s/usr/share/man", sdk);
 		iter(path);
 		free(sdk);
@@ -1496,31 +1811,38 @@ xcrun_main_entry(const char *tool_name, int argc, char *argv[],
 	int call_state;
 	char *this_tool = NULL;
 
-	/* Strip out any path name that may have been passed into argv[0] */
-	this_tool = dup_basename(tool_name);
-	progname = this_tool;
-
-	/* Check if we are being treated as a multi-call binary. */
-	call_state = get_multicall_state(this_tool, multicall_tool_names, 4);
+  	/*
+  	 * A NULL name is how the caller says "be xcrun": the system shim
+  	 * passes NULL whenever the process was really invoked as xcrun, and
+  	 * libxcselect passes it when it wants the xcrun interface.  Any
+  	 * other name is a tool to run.
+  	 *
+  	 * That is the whole of the dispatch, and it is narrower than it
+  	 * looks.  The shipped library does not consult a table of names and
+  	 * does not treat "xcrun" or "xcrun_log" as special: asked for those,
+  	 * it reports them as utilities it cannot find, while a NULL gets
+  	 * the xcrun interface.  The table that used to be here turned the
+  	 * caller's own name into behaviour, which meant a process invoked
+  	 * under the name "xcrun" and one invoked under "xcrun_log" behaved
+  	 * differently from the shipped library in both cases.
+  	 */
+  	if (tool_name == NULL) {
+  		progname = "xcrun";
+  		call_state = 1;
+  		this_tool = dup_basename(progname);
+  	} else {
+  		/* Strip out any path name that may have been passed in. */
+  		this_tool = dup_basename(tool_name);
+  		progname = this_tool;
+  		call_state = -1;
+  	}
 
 	/* Execute based on the state that we were called in. */
 	switch (call_state) {
-		case 1: /* xcrun */
-			retval = xcrun_parse_args(argc, argv);
+		case 1: /* be xcrun */
+			retval = xcrun_parse_xcrun_args(argc, argv, progname);
 			break;
-		case 2: /* xcrun_log */
-			logging_mode = 1;
-			retval = xcrun_parse_args(argc, argv);
-			break;
-		case 3: /* xcrun_verbose */
-			verbose_mode = 1;
-			retval = xcrun_parse_args(argc, argv);
-			break;
-		case 4: /* xcrun_nocache */
-			retval = xcrun_parse_args(argc, argv);
-			break;
-		case -1:
-		default: /* called as tool name */
+		default: /* called as a tool name */
 			/* Locate and execute the command */
 			if (request_command(this_tool, argc, argv) != -1)
 				retval = -1; /* NOREACH */

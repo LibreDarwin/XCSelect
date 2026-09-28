@@ -773,7 +773,7 @@ static void
 xcselect_invoke_xcrun_via_library(const char *path, char *tool_name, int argc,
     char *argv[], const char *devdir)
 {
-	int (*xcrun_main)(char *, int, char *[], const char *);
+	void (*xcrun_main)(char *, int, char *[], const char *);
 	void (*set_handler)(void (^)(const char *));
 	void *handle;
 
@@ -783,7 +783,7 @@ xcselect_invoke_xcrun_via_library(const char *path, char *tool_name, int argc,
 		exit(1);
 	}
 
-	if ((xcrun_main = (int (*)(char *, int, char *[], const char *))
+	if ((xcrun_main = (void (*)(char *, int, char *[], const char *))
 	    dlsym(handle, "xcrun_main")) == NULL) {
 		fprintf(stderr,
 		    "xcrun: error: unable to resolve xcrun_main (%s).\n",

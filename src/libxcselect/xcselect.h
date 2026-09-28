@@ -109,8 +109,9 @@ int xcselect_host_sdk_path(int which, char **out);
 
 /*
  * Run a tool through xcrun.  argc and argv are the tool's own, without
- * the xcrun argument; tool_name may be NULL, which asks for the tool
- * named by argv[0].  require_xcode rejects a Command Line Tools install
+ * the xcrun argument.  tool_name is the tool to run, and only NULL for
+ * xcrun itself: every other name, argv[0] included, names the tool and so
+ * is run as one.  require_xcode rejects a Command Line Tools install
  * rather than running against it.  Does not return on success.
  */
 void xcselect_invoke_xcrun(char *tool_name, int argc, char *argv[],
