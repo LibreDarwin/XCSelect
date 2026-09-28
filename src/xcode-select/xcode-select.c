@@ -40,7 +40,13 @@
 
 #include "xcselect.h"
 
-#define TOOL_VERSION "1.0.0"
+/*
+ * The version the tool answers for -v is the version of the developer
+ * tools it shipped with, which is what the shipped tool answers and
+ * what its library reports, so the two agree -- it is not this source
+ * file's own revision.
+ */
+#define TOOL_VERSION "2416"
 #define SDK_CFG ".xcdev.dat"
 #ifndef XCRUN_DEFAULT_DEVELOPER_DIR
 #define XCRUN_DEFAULT_DEVELOPER_DIR "/Library/Developer/CommandLineTools"
@@ -120,66 +126,25 @@ static int validate_directory_path(const char *dir)
  */
 static char *get_developer_path(void)
 {
-	FILE *fp = NULL;
-	char devpath[PATH_MAX - 1];
-	char *pathtocfg = NULL;
-	char cfg_path[PATH_MAX];
-	char *value = NULL;
-
-	if ((value = getenv("DEVELOPER_DIR")) != NULL)
-		return value;
-
-	memset(devpath, 0, sizeof(devpath));
-
-	if ((pathtocfg = getenv("HOME")) == NULL) {
-		fprintf(stderr, "xcode-select: error: failed to read HOME environment variable.\n");
-		return NULL;
-	}
+	static char devdir[PATH_MAX];
+	bool from_env = false, cltools = false, fallback = false;
 
 	/*
-	 * Built with snprintf into a bounded buffer.  What stood here
-	 * appended to the string getenv() returned -- writing past the end
-	 * of the environment's own copy of HOME -- and then strcat'd onto
-	 * a malloc'd buffer that had never been initialised, so the
-	 * destination length came from whatever the heap happened to hold.
+	 * The active directory is the library's question and not this
+	 * one's: it is the chain xcrun and every other tool agree on --
+	 * DEVELOPER_DIR, the selection, the system defaults -- and it is
+	 * what the shipped tool prints for -p.  There is no per-user
+	 * file beside it; nothing of Apple's ever consulted one, so a
+	 * caller without HOME is no worse off here, and no stale value
+	 * can linger where an uninstall removed the tools.
 	 */
-	if (snprintf(cfg_path, sizeof(cfg_path), "%s/%s", pathtocfg,
-	    SDK_CFG) >= (int)sizeof(cfg_path)) {
-		fprintf(stderr, "xcode-select: error: configuration path too"
-		    " long.\n");
-		return NULL;
-	}
+	if (xcselect_get_developer_dir_path(devdir, sizeof(devdir),
+	    &from_env, &cltools, &fallback))
+		return devdir;
 
-	if ((fp = fopen(cfg_path, "r")) != NULL) {
-		fseek(fp, SEEK_SET, 0);
-		(void)fread(devpath, (PATH_MAX - 1), 1, fp);
-		value = devpath;
-		fclose(fp);
-	} else {
-		struct stat st;
-
-		/*
-		 * No per-user selection.  libxcselect answers the rest --
-		 * the symlinks xcode-select -s writes, the data file, then
-		 * the system defaults -- which is the library Apple's
-		 * xcode-select asks the same question of, so xcrun and this
-		 * tool cannot disagree.
-		 */
-		static char devdir[PATH_MAX];
-		bool from_env = false, cltools = false, fallback = false;
-
-		(void)st;
-
-		if (xcselect_get_developer_dir_path(devdir, sizeof(devdir),
-		    &from_env, &cltools, &fallback))
-			return devdir;
-
-		fprintf(stderr, "xcode-select: error: unable to determine the"
-		    " developer directory.\n");
-		return NULL;
-	}
-
-	return value;
+	fprintf(stderr, "xcode-select: error: unable to determine the"
+	    " developer directory.\n");
+	return NULL;
 }
 
 /**
