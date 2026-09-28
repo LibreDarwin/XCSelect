@@ -11,10 +11,8 @@
 		FE0000000000000000000003 /* xcrun.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000014 /* xcrun.c */; };
 		FE0000000000000000000004 /* ini.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000015 /* ini.c */; };
 		FE0000000000000000000005 /* sdkpath.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000020 /* sdkpath.c */; };
-		FE0000000000000000000006 /* plist.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000022 /* plist.c */; };
+		FE0000000000000000000006 /* cfplist.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000022 /* cfplist.c */; };
 		FE0000000000000000000007 /* json.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000024 /* json.c */; };
-		FE0000000000000000000008 /* xmlplist.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000026 /* xmlplist.c */; };
-		FE0000000000000000000009 /* bplist.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000027 /* bplist.c */; };
 		FE000000000000000000000A /* xcode-select.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000018 /* xcode-select.c */; };
 /* End PBXBuildFile section */
 
@@ -47,12 +45,10 @@
 		FE0000000000000000000019 /* xcode-select */ = {isa = PBXFileReference; explicitFileType = compiled.mach-o.executable; includeInIndex = 0; path = xcode-select; sourceTree = BUILT_PRODUCTS_DIR; };
 		FE0000000000000000000020 /* sdkpath.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = sdkpath.c; sourceTree = "<group>"; };
 		FE0000000000000000000021 /* sdkpath.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = sdkpath.h; sourceTree = "<group>"; };
-		FE0000000000000000000022 /* plist.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = plist.c; sourceTree = "<group>"; };
-		FE0000000000000000000023 /* plist.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = plist.h; sourceTree = "<group>"; };
+		FE0000000000000000000022 /* cfplist.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = cfplist.c; sourceTree = "<group>"; };
+		FE0000000000000000000023 /* cfplist.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = cfplist.h; sourceTree = "<group>"; };
 		FE0000000000000000000024 /* json.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = json.c; sourceTree = "<group>"; };
 		FE0000000000000000000025 /* json.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = json.h; sourceTree = "<group>"; };
-		FE0000000000000000000026 /* xmlplist.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = xmlplist.c; sourceTree = "<group>"; };
-		FE0000000000000000000027 /* bplist.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = bplist.c; sourceTree = "<group>"; };
 		FE0000000000000000000028 /* devpath.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = devpath.c; sourceTree = "<group>"; };
 		FE0000000000000000000029 /* devpath.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = devpath.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -116,12 +112,10 @@
 			children = (
 				FE0000000000000000000020 /* sdkpath.c */,
 				FE0000000000000000000021 /* sdkpath.h */,
-				FE0000000000000000000022 /* plist.c */,
-				FE0000000000000000000023 /* plist.h */,
+				FE0000000000000000000022 /* cfplist.c */,
+				FE0000000000000000000023 /* cfplist.h */,
 				FE0000000000000000000024 /* json.c */,
 				FE0000000000000000000025 /* json.h */,
-				FE0000000000000000000026 /* xmlplist.c */,
-				FE0000000000000000000027 /* bplist.c */,
 				FE0000000000000000000028 /* devpath.c */,
 				FE0000000000000000000029 /* devpath.h */,
 			);
@@ -253,10 +247,8 @@
 				FE0000000000000000000003 /* xcrun.c in Sources */,
 				FE0000000000000000000004 /* ini.c in Sources */,
 				FE0000000000000000000005 /* sdkpath.c in Sources */,
-				FE0000000000000000000006 /* plist.c in Sources */,
+				FE0000000000000000000006 /* cfplist.c in Sources */,
 				FE0000000000000000000007 /* json.c in Sources */,
-				FE0000000000000000000008 /* xmlplist.c in Sources */,
-				FE0000000000000000000009 /* bplist.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -395,6 +387,8 @@
 				OTHER_LDFLAGS = (
 					"-L$(CONFIGURATION_BUILD_DIR)",
 					"-lxcselect",
+					"-framework",
+					CoreFoundation,
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
@@ -429,6 +423,8 @@
 				OTHER_LDFLAGS = (
 					"-L$(CONFIGURATION_BUILD_DIR)",
 					"-lxcselect",
+					"-framework",
+					CoreFoundation,
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
