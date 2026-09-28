@@ -750,6 +750,10 @@ static const char *default_cfg_path(void)
 /* The trace of a run that resolves an SDK is printed from below manpath_env. */
 static void verbose_manpath_note(const char *sdkfield, const char *sdkpath);
 
+/* Defined below manpath_env, used by get_sdk_path. */
+static char *xcodebuild_sdk_query(const char *arg, const char *query, int voice);
+static int cache_db_has_key(const char *sdkfield);
+
 static char *get_sdk_path(const char *name)
 {
 	char *path = NULL;
@@ -777,8 +781,31 @@ static char *get_sdk_path(const char *name)
 	 */
 	if (*name == '/') {
 		validate_directory_path(name);
+
+		/*
+		 * Where a toolchain is in charge, a path asked for with the
+		 * cache put aside is resolved the same way a name is: the
+		 * toolchain says where it is, and the platform it lives in
+		 * is named after it.  It is part of the same trace, so a
+		 * bypassed or cleared cache reads nothing and asks the
+		 * toolchain everything.
+		 */
+		if (devdir_has_toolchains() &&
+		    (cache_bypass_f == 1 || cache_cleared_f == 1))
+			(void)xcodebuild_sdk_query(name, "PlatformPath", 1);
+
 		return strdup(name);
-	} else if ((path = xt_find_sdk(developer_dir, name)) != NULL)
+	}
+
+	/*
+	 * The directory is where we answer a name ourselves, and it is
+	 * where a bypassed or cleared cache is still answered from, where
+	 * there is no other answer to give: those flags govern the cache,
+	 * and the directory is not it.  A toolchain layout is the case that
+	 * has to ask elsewhere once the cache is put aside.
+	 */
+	if ((!devdir_has_toolchains() || (cache_bypass_f != 1 && cache_cleared_f != 1)) &&
+	    (path = xt_find_sdk(developer_dir, name)) != NULL)
 		return path;
 
 	/*
@@ -787,10 +814,30 @@ static char *get_sdk_path(const char *name)
 	 * so itself -- with a result bundle and a timestamp on every line, so
 	 * that half is not reproduced here.
 	 */
-	if (!devdir_has_toolchains())
+	if (!devdir_has_toolchains()) {
 		fprintf(stderr, "xcrun: error: SDK \"%s\" cannot be located\n", name);
+		return NULL;
+	}
 
-	return NULL;
+	/*
+	 * The name was not answered by the directory, so the toolchain is
+	 * asked where the SDK is.  A name it cannot place has already said
+	 * so, in its own terms, and there is no SDK then whether or not a
+	 * tool that follows on needs one: the name named an SDK, and the
+	 * SDK is what did not come back.
+	 */
+	if ((path = xcodebuild_sdk_query(name, "Path", 1)) == NULL)
+		return NULL;
+
+	/*
+	 * Where the cache was put aside the two-ask form is made whole: the
+	 * name resolved, and the platform it lives in follows, both asked of
+	 * the toolchain that answered the first.
+	 */
+	if (cache_bypass_f == 1 || cache_cleared_f == 1)
+		(void)xcodebuild_sdk_query(path, "PlatformPath", 1);
+
+	return path;
 }
 
 /**
@@ -825,8 +872,31 @@ static char *require_sdk_path(const char *name, const char *item)
 	 * here -- the shipped library looks it up again rather than
 	 * remembering the answer, and a run of this option shows two
 	 * "cannot be located" lines where a run of a tool shows one.
+	 *
+	 * Where toolchains are kept the miss is the toolchain's own doing and
+	 * is told in its own terms, which a flat layout has none of: the SDK
+	 * is asked where it lives, and that answer -- a property list that
+	 * was never there -- is what fails, before the item is asked for at
+	 * all.  Both are lookups in the same SDK, so both are made.
+	 *
+	 * Both are made the first time, though, and not after: a name the
+	 * cache has already been asked about is one whose question has
+	 * already been answered, and a run that finds the answer repeats
+	 * neither the question nor its failure.  So the first run of a name
+	 * that is not there asks twice more and the ones after it ask
+	 * neither, which is the only difference between them.
 	 */
-	(void)get_sdk_path(name);
+	if (devdir_has_toolchains() && !cache_db_has_key(name)) {
+		char *cwd = getcwd(NULL, 0);
+
+		(void)xcodebuild_sdk_query(name, "PlatformPath", 0);
+		fprintf(stderr, "xcrun: error: Failed to open property list '%s/%s/SDKSettings.plist'\n",
+		    cwd != NULL ? cwd : "", name);
+		(void)xcodebuild_sdk_query(name, item, 0);
+		free(cwd);
+	} else {
+		(void)get_sdk_path(name);
+	}
 	fprintf(stderr, "xcrun: error: unable to lookup item '%s' in SDK '%s'\n", item, name);
 	exit(1);
 }
@@ -1069,6 +1139,71 @@ static char *cache_db_path(char *buf, size_t len)
 }
 
 /**
+ * @func cache_db_has_key -- whether the cache already holds an answer
+ * @arg sdkfield - the SDK as it is named in the key: a path, or the name
+ *     as the user wrote it when no SDK could be located
+ * @return: 1 when the key is in the file, 0 when it is not or the file
+ *     cannot be read
+ *
+ * The file is a table of answers, and a name that has been asked about is
+ * in it whether or not the answer was an SDK: a name that located nothing
+ * is filed under the same key a name that located something is, and its
+ * answer is the manual page path that would have been used.  A later run
+ * of the same question therefore finds the name already known, and reports
+ * what it knows instead of asking the SDK again -- which is the whole
+ * difference between the first such run and the ones after it.
+ *
+ * The file is the shipped library's own and its framing is not ours to
+ * depend on, so what it is asked is the one thing that does not depend on
+ * the framing: whether the key is anywhere in it.  Every key is written
+ * as text ending in a terminator, so the key is searched for with its
+ * terminator, which is what tells one answer's name from the text of
+ * another.
+ *
+ * A --no-cache run has not looked at the file and a -k run has just
+ * emptied it, and in both cases there is nothing to find.
+ */
+static int cache_db_has_key(const char *sdkfield)
+{
+	char db[PATH_MAX];
+	char key[PATH_MAX * 2];
+	FILE *fp;
+	char *buf;
+	size_t keylen;
+	long size;
+	int found = 0;
+
+	if (cache_bypass_f == 1 || cache_cleared_f == 1)
+		return 0;
+
+	if (cache_db_path(db, sizeof(db)) == NULL)
+		return 0;
+
+	if (snprintf(key, sizeof(key), "%s|%s|<manpath>", sdkfield, developer_dir) >= (int)sizeof(key))
+		return 0;
+	keylen = strlen(key) + 1;
+
+	if ((fp = fopen(db, "rb")) == NULL)
+		return 0;
+
+	if (fseek(fp, 0, SEEK_END) == 0 && (size = ftell(fp)) > 0 &&
+	    size >= (long)keylen) {
+		rewind(fp);
+
+		if ((buf = malloc((size_t)size)) != NULL) {
+			if (fread(buf, 1, (size_t)size, fp) == (size_t)size &&
+			    memmem(buf, (size_t)size, key, keylen) != NULL)
+				found = 1;
+			free(buf);
+		}
+	}
+
+	fclose(fp);
+
+	return found;
+}
+
+/**
  * @func verbose_note -- one note of the -v trace
  * @arg fmt - what the note says
  *
@@ -1180,6 +1315,90 @@ static void verbose_env_note(const char *sdkroot, const char *toolchains)
 
 	if (cache_db_path(db, sizeof(db)) != NULL)
 		verbose_note("xcrun_db = '%s'", db);
+}
+
+/**
+ * @func xcodebuild_sdk_query -- ask the toolchain where an SDK is
+ * @arg arg - the SDK as xcodebuild should see it: a name, or a path
+ * @arg query - the SDK item to ask for: Path or PlatformPath
+ * @arg voice - whether the resolution is named for the -v trace
+ * @return: malloc'd answer, or NULL when the toolchain has none
+ *
+ * Where toolchains are kept the SDK question is xcodebuild's to answer,
+ * and the two answers this library asks for are where the SDK is and what
+ * platform it lives in.  The shipped library says so as it works, with the
+ * command named first, the environment the resolution is made under next,
+ * and the answer the toolchain gives last -- and each of the three is
+ * reproduced here because -v is a trace of the run, not a summary.
+ *
+ * The child is handed the question through the shell, as Apple runs it, so
+ * it inherits this stderr: a lookup that fails will have already said what
+ * the toolchain says about the SDK it was asked for, in terms Apple
+ * controls, and this only reports the shape of the failure on top.  The
+ * answer it gives on stdout is what is returned.
+ */
+static char *xcodebuild_sdk_query(const char *arg, const char *query, int voice)
+{
+	char *xcodebuild = NULL;
+	char *cmd = NULL;
+	char *line = NULL;
+	size_t linecap = 0;
+	FILE *fp;
+	char *answer = NULL;
+
+	if (developer_dir == NULL)
+		return NULL;
+
+	if (asprintf(&xcodebuild, "%s/usr/bin/xcodebuild", developer_dir) == -1)
+		return NULL;
+
+	/*
+	 * A Command Line Tools developer directory has no xcodebuild in it
+	 * at all, so a toolchain question is not even asked there: the SDK
+	 * question is ours to answer, and answers it has none.  The caller
+	 * decides what that means.
+	 */
+	if (access(xcodebuild, (F_OK | X_OK)) == -1) {
+		free(xcodebuild);
+		return NULL;
+	}
+
+	if (asprintf(&cmd, "%s -sdk %s -version %s", xcodebuild, arg, query) == -1) {
+		free(xcodebuild);
+		return NULL;
+	}
+
+	if (voice) {
+		verbose_note("looking up SDK with '%s'", cmd);
+		verbose_env_note(arg, "");
+	}
+
+	if ((fp = popen(cmd, "r")) != NULL) {
+		ssize_t len = getline(&line, &linecap, fp);
+		int cstatus = pclose(fp);
+
+		if (voice) {
+			while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+				line[--len] = '\0';
+
+			if (len > 0 && WIFEXITED(cstatus) && WEXITSTATUS(cstatus) == 0) {
+				verbose_note("lookup resolved to: '%s'", line);
+				answer = strdup(line);
+			}
+		} else if (len > 0 && WIFEXITED(cstatus) && WEXITSTATUS(cstatus) == 0) {
+			while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+				line[--len] = '\0';
+			if (len > 0)
+				answer = strdup(line);
+		}
+	}
+
+	free(line);
+	free(cmd);
+	free(xcodebuild);
+
+	/* A resolver that failed has already said why; the caller carries on. */
+	return answer;
 }
 
 /**
@@ -1659,9 +1878,16 @@ static char *xcodebuild_find_path(const char *name)
 			 * The status is reported as pclose hands it back,
 			 * exit code shifted into the high half rather than
 			 * unpacked from it: a tool xcodebuild will not name
-			 * exits 69 and is reported as 17664.
+			 * exits 69 and is reported as 17664.  The errno is
+			 * the one from looking, not from running: an SDK
+			 * that is not there, or a cache put aside so the
+			 * filesystem is what answers, is a lookup made and
+			 * failed for want of what it looked for.
 			 */
 			status = cstatus;
+			if (validate_directory_path(sdk) == (-1) ||
+			    cache_bypass_f == 1 || cache_cleared_f == 1)
+				errno = ENOENT;
 			fprintf(stderr, "xcrun: error: sh -c \'%s\' failed with exit code %d: (null) (errno=%s)\n",
 			    cmd, status, strerror(errno));
 		}
@@ -1801,6 +2027,21 @@ static int request_command(const char *name, int argc, char *argv[])
 		verbose_tool_key_note(name, sdkfield, verbose_toolchain_text());
 		free(sdk);
 	}
+
+	/*
+	 * Where the utility is asked for and the developer dir keeps
+	 * toolchains, the answer is the toolchain's to give -- but only
+	 * when nothing second-hand is left to answer with: a warm lookup
+	 * has a learned answer in the database and names it as such, and it
+	 * is a bypassed or cleared cache that sends the question to
+	 * xcodebuild directly.  xcrun reports what it was asked and where
+	 * the answer came from, and asks no higher.  The searches above are
+	 * what a flat Command Line Tools layout, or a tool being run, makes.
+	 */
+	if (finding_mode == 1 && devdir_has_toolchains() &&
+	    (cache_bypass_f == 1 || cache_cleared_f == 1))
+		return -1;
+
 	if ((cmd = search_command(name, search_string)) != NULL) {
 		/*
 		 * The lookup found the tool, and a working copy of the

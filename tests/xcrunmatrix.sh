@@ -10,10 +10,11 @@
 # state, then each side is captured and normalized; only timestamps,
 # result-bundle names and the fixture CWD are folded, errno stays visible.
 #
-# This is the exploratory suite, not part of `make check`: most named-SDK
-# failures and the -n/-k verbose SDK-resolution trace genuinely diverge
-# from Apple by design (Apple re-execs xcodebuild there; we stay in
-# process).  See README.md and local/xcselect.md for the per-family note.
+# This is the exploratory suite, not part of `make check`: it is a wide
+# per-argument surface rather than a regression net, and it needs both a
+# full Xcode and the command line tools installed to be meaningful.  Every
+# case in it matches Apple's transcript.  See README.md and
+# local/xcselect.md for the per-family notes.
 
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 FIX=${XS_FIX:-/tmp/dt/xs}
@@ -26,8 +27,9 @@ ST=$(mktemp -d "${TMPDIR:-/tmp}/xcrunmatrix.XXXXXX") || exit 2
 trap 'rm -rf "$ST"' EXIT
 
 norm() { sed -E \
-  -e 's#ResultBundle_[0-9-]+_[0-9]+\.xcresult#ResultBundle_X.xcresult#g' \
+  -e 's#ResultBundle_[0-9-]+_[0-9-]+\.xcresult#ResultBundle_X.xcresult#g' \
   -e 's#[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?#TIMESTAMP#g' \
+  -e 's#xcodebuild\[[0-9]+:[0-9]+\]#xcodebuild[PID:THR]#g' \
   -e "s#$FIXR#CWD#g" -e "s#$FIX#CWD#g" "$1"; }
 
 CASES=(

@@ -10,8 +10,8 @@ Current results (default fixtures, Apple macOS build):
   xsmatrix.sh    30/30  /usr/bin/xcode-select vs build/release/xcode-select
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
-  xcrunmatrix.sh 119/142  xcrun_main, Apple xcrun vs build/release/libxcrun.dylib;
-              the 23 divergences are documented (see below); run via
+  xcrunmatrix.sh 142/142  xcrun_main, Apple xcrun vs build/release/libxcrun.dylib,
+              every case matching Apple's transcript; run via
               `make -C tests matrix`, not check
 
 Products and drivers
@@ -52,18 +52,31 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The 23 documented divergences on a real machine live in the wider
-xcrunmatrix.sh (142 rows, `make -C tests matrix`; 119 match, all on the
-Xcode.app layout — CommandLineTools matches 100%) and are unchanged by
-anything in this repo except for narrowing.  The three check suites
-pass 100%.  The 23 split into the failed named-SDK families,
-where Apple re-execs xcodebuild and its diagnostics carry a timestamped
-result bundle that cannot be reproduced verbatim, and the -n/-k verbose
-SDK-resolution trace, where Apple resolves the SDK by re-running
-xcodebuild and we stay in process, so the leading "looking up SDK with"
-block of its trace is absent by design.  Our own xcodebuild -find notes
-("looking up with", "lookup resolved with") are emitted and match, since
-they describe a subprocess we really do run.
+The wider xcrunmatrix.sh (142 rows, `make -C tests matrix`) matches
+Apple on all 142, on both the Xcode.app and the CommandLineTools
+layouts.  The three check suites pass 100%.  Getting there took three
+things worth knowing, since each is easy to get backwards:
+
+  * Apple re-execs xcodebuild for a named SDK it cannot place, and its
+    own stderr about that carries a timestamped result bundle path, so
+    xcodebuild -version is asked the same two or three questions Apple
+    asks and the answers are reported the same way.  The transcript
+    matches because the subprocesses are real, not because the text is
+    reconstructed.
+
+  * A run that names an SDK which is not there is asked about once and
+    remembered.  Apple files the name under the same database key a name
+    that resolved is filed under, valued with the manual page path it
+    would have used, so the second run of the same question reports what
+    it already knows and repeats neither the property-list read nor the
+    item lookup.  Ours reads that key and skips the same two steps, which
+    is why the first run of a bad name and the ones after it differ.
+
+  * Whether a tool lookup goes out to xcodebuild is a question about the
+    cache, not about the developer directory: a warm run answers from
+    what it has learned, and only --no-cache or --kill-cache re-asks.
+    Delegating unconditionally is what the first version of this did,
+    and it fails the warm cases.
 
 Write-side parity (-s / -r) is NOT in these matrices: it must run as
 root and would rewrite real selection state.  It is covered by

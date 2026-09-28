@@ -47,8 +47,9 @@ check: all
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} sh libxsmatrix.sh
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} bash ivkmatrix.sh
 
-# The wide Apple-vs-ours surface.  Not part of check: it counts the
-# documented divergences instead of expecting parity.  Needs bash.
+# The wide Apple-vs-ours surface.  Not part of check: it is a per-argument
+# sweep, and it needs both a full Xcode and the command line tools.  Every
+# case in it is compared against Apple's own transcript.  Needs bash.
 matrix: all
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} bash xcrunmatrix.sh
 
