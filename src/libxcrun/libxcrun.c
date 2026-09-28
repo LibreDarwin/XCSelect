@@ -1963,13 +1963,22 @@ xcrun_iter_manpaths(const char *devdir, const char *sysroot,
 	 * A Command Line Tools directory has no platform bundle, and the
 	 * shipped library does not invent one: asked against it, the list is
 	 * the SDK's, the developer directory's and the toolchain's, with the
-	 * platform's pages absent rather than named and missing.  So this
-	 * one is named only when it is really there.
+	 * platform's pages absent rather than named and missing.
+	 *
+	 * What decides it is the platform bundle and not the pages inside
+	 * it.  Apple names the platform's pages for a full Xcode whether or
+	 * not that Xcode ships any -- the man pages themselves are not
+	 * installed, and the path is named anyway, because the platform is
+	 * what the path belongs to and the platform is there.  Testing for
+	 * the directory instead leaves the platform's entry out of the list
+	 * on exactly the installations that have a platform, and in.
 	 */
-	snprintf(path, sizeof(path), "%s/Platforms/MacOSX.platform/usr/share/man",
-	    devdir);
-	if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
+	snprintf(path, sizeof(path), "%s/Platforms/MacOSX.platform", devdir);
+	if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+		snprintf(path, sizeof(path), "%s/Platforms/MacOSX.platform/usr/share/man",
+		    devdir);
 		iter(path);
+	}
 
 	snprintf(path, sizeof(path), "%s/usr/share/man", devdir);
 	iter(path);
