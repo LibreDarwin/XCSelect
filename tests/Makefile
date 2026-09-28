@@ -7,8 +7,9 @@
 # Portable to both GNU make and BSD make (bmake).  CONFIG/SDK/CC default
 # to the top-level Makefile's; make check runs all three read-only
 # matrices against Apple's binaries using the default fixture root.
-# xcrunmatrix.sh is the exploratory suite and has its own `matrix` target,
-# because it intentionally carries the known Apple divergences.
+# xcrunmatrix.sh is the wide per-argument sweep and has its own `matrix`
+# target; it needs both an Xcode and the Command Line Tools installed, so
+# it is kept out of check, which runs the three read-only ones.
 
 CONFIG ?= release
 SDK    ?= /Users/sunneva/xnuports-root/devel/xcode-tools/build/release/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.Internal.sdk
@@ -53,4 +54,12 @@ check: all
 matrix: all
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} bash xcrunmatrix.sh
 
-.PHONY: all check matrix
+# The write side, -s and -r, against a sandbox.  Also not part of check:
+# it compiles a second xcode-select with XC_SELECT_WRITE_ROOT lowered into
+# a scratch tree and links tests/rootstub.c's geteuid(), so it needs the
+# SDK and CC the products were built with, and it is the one harness here
+# that is not a plain differential script.
+sandbox: all
+	XS_FIX=$${XS_FIX:-/tmp/dt/xs} sh sandbox.sh
+
+.PHONY: all check matrix sandbox

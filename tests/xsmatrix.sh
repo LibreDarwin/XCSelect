@@ -4,8 +4,8 @@
 # invalid-argument handling, and the --switch argument validation that
 # fails before it can touch any state.  Nothing that writes the
 # selection (-s as root, -r, --install without a developer directory) is
-# exercised; the write paths are covered separately by the root-gated
-# sandbox described in README.md.
+# exercised; the write paths are covered by sandbox.sh, which stands on
+# the root gate rather than defeating it (see README.md).
 #
 # The checkout root is where the products live (build/release), and the
 # fixtures (FAKE.app and any dev-dir layouts) come from XS_FIX, default

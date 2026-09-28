@@ -78,13 +78,36 @@ things worth knowing, since each is easy to get backwards:
     Delegating unconditionally is what the first version of this did,
     and it fails the warm cases.
 
-Write-side parity (-s / -r) is NOT in these matrices: it must run as
-root and would rewrite real selection state.  It is covered by
-compiling xcode-select.c with -DXC_SELECT_WRITE_ROOT='"/tmp/.../sbox"'
-(lowering every /usr/share path into the sandbox), linking tests-built
-rootstub.o (uid_t geteuid(void){return 0;}), and running -s with a
-fixture path and -r: three symlinks plus the data file are created,
-reset clears all four.  The scratch script sandbox_test.sh that drives
-this sequence stays in the fixture root (it writes nothing else and
-needs the stub+link recipe above, which is machine-local), so it is not
-committed here.
+Write-side parity (-s / -r) is NOT in these matrices: -s rewrites the one
+selection the whole system reads, so it must run as root, and there is no
+way to run it from a normal account without either sudo or editing the
+gate out of the source -- and editing the gate out means the thing under
+test is no longer the thing that ships.  sandbox.sh has its own `sandbox`
+target and stands on the gate instead of defeating it:
+
+  rootstub.c   a geteuid() returning 0, linked into the sandboxed build
+  xcode-select.c
+               recompiled with XC_SELECT_WRITE_ROOT set to a mktemp
+               directory, which lowers all four write paths under it
+  sandbox.sh   builds the two together, then drives -s and -r against
+               the scratch tree and reads the result back off disk
+
+So the gate does its job, the write really happens, and the only bytes
+involved are removed on the way out.  The real /var/select, /var/db and
+/usr/share selection is never touched -- which is also the limit of what
+it proves: it exercises the code that writes those paths, not the paths
+themselves.
+
+9 rows: -s lays down three links and the data file (and the data file is
+exactly the path plus one trailing newline, the one the reader strips);
+the writer's and the reader's path lists name the same four files, which
+is what keeps a successful -s from being invisible to -p; a second -s
+replaces rather than accumulates; -r clears all four and writes no
+default; a rejected -s writes nothing; and the shipped build still
+refuses both options as a normal user, which is the reason any of this
+is necessary.
+
+Note what it cannot check: libxcselect's copy of those four paths has no
+write-root macro, so -p cannot be pointed at the sandbox (DEVELOPER_DIR
+overrides the selection outright, which is not the same test).  The
+reader/writer agreement is checked by comparing the two lists instead.
