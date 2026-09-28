@@ -1,12 +1,14 @@
-# Differential parity harnesses.  The drivers dlopen a libxcselect by
-# path, so they are built with the same toolchain the products use, but
-# into build/test so they never sit next to the library or tools they
-# measure (nothing in this tree uses them).  See README.md for the
-# fixture contract and the three matrix scripts.
+# Differential parity harnesses.  The drivers dlopen a libxcselect or
+# libxcrun by path, so they are built with the same toolchain the products
+# use, but into build/test so they never sit next to the library or tools
+# they measure (nothing in this tree uses them).  See README.md for the
+# fixture contract and the four matrix scripts.
 #
 # Portable to both GNU make and BSD make (bmake).  CONFIG/SDK/CC default
 # to the top-level Makefile's; make check runs all three read-only
 # matrices against Apple's binaries using the default fixture root.
+# xcrunmatrix.sh is the exploratory suite and has its own `matrix` target,
+# because it intentionally carries the known Apple divergences.
 
 CONFIG ?= release
 SDK    ?= /Users/sunneva/xnuports-root/devel/xcode-tools/build/release/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.Internal.sdk
@@ -20,7 +22,7 @@ BUILD_DIR := ../build/test
 # setenv/strlcpy, which the vanilla clang headers leave out.
 CFLAGS := $(OPT) -std=c11 -D_DARWIN_C_SOURCE -isysroot "$(SDK)" -Wall -Wextra
 
-DRIVERS := $(BUILD_DIR)/ivk $(BUILD_DIR)/libxstest
+DRIVERS := $(BUILD_DIR)/ivk $(BUILD_DIR)/libxstest $(BUILD_DIR)/xcrundrive
 
 all: $(DRIVERS)
 
@@ -32,13 +34,22 @@ $(BUILD_DIR)/libxstest: libxstest.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ libxstest.c
 
+$(BUILD_DIR)/xcrundrive: xcrundrive.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ xcrundrive.c
+
 # The matrices are read-only, so they are safe to run from a normal user
 # account; set XS_FIX if your fixtures live somewhere other than
-# /tmp/dt/xs.  ivkmatrix.sh runs xcrun shim-style invocations and needs
-# bash; the other two are plain sh.
+# /tmp/dt/xs.  ivkmatrix.sh and xcrunmatrix.sh run xcrun shim-style
+# invocations and need bash; the other two are plain sh.
 check: all
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} sh xsmatrix.sh
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} sh libxsmatrix.sh
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} bash ivkmatrix.sh
 
-.PHONY: all check
+# The wide Apple-vs-ours surface.  Not part of check: it counts the
+# documented divergences instead of expecting parity.  Needs bash.
+matrix: all
+	XS_FIX=$${XS_FIX:-/tmp/dt/xs} bash xcrunmatrix.sh
+
+.PHONY: all check matrix

@@ -10,11 +10,14 @@ Current results (default fixtures, Apple macOS build):
   xsmatrix.sh    30/30  /usr/bin/xcode-select vs build/release/xcode-select
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
+  xcrunmatrix.sh 119/142  xcrun_main, Apple xcrun vs build/release/libxcrun.dylib;
+              the 23 divergences are documented (see below); run via
+              `make -C tests matrix`, not check
 
 Products and drivers
 --------------------
 `make` (top-level) puts the products in build/release; `make` in tests/
-puts the two dlopen drivers in build/test:
+puts the three dlopen drivers in build/test:
   ivk      dlopens a libxcselect named by DRIVE_LIB (Apple's by default)
            and calls xcselect_invoke_xcrun; DRIVE_DEV becomes
            DEVELOPER_DIR.  Measures libxcselect's own invoke behavior
@@ -23,6 +26,11 @@ puts the two dlopen drivers in build/test:
            exercises one export at a time (devdir, match, find, version,
            hostsdk, bundle, manpaths), printing the result for diffing.
            Nothing here is write-side.
+  xcrundrive
+           dlopens the libxcrun named by DRIVE_LIB (our build) and
+           calls xcrun_main with the caller's argv, the way the xcrun
+           front-end does, so the full argument surface can be diffed
+           against Apple's /usr/bin/xcrun without touching real state.
 
 Fixtures (XS_FIX, default /tmp/dt/xs)
 -------------------------------------
@@ -45,8 +53,17 @@ against a missing/odd layout as well as a real one:
              re-copying the source, no commit involved.
 
 The 23 documented divergences on a real machine live in the wider
-matrix.sh (119 rows) and are unchanged by anything in this repo; the
-three suites here are the ones that pass 100%.
+xcrunmatrix.sh (142 rows, `make -C tests matrix`; 119 match, all on the
+Xcode.app layout — CommandLineTools matches 100%) and are unchanged by
+anything in this repo except for narrowing.  The three check suites
+pass 100%.  The 23 split into the failed named-SDK families,
+where Apple re-execs xcodebuild and its diagnostics carry a timestamped
+result bundle that cannot be reproduced verbatim, and the -n/-k verbose
+SDK-resolution trace, where Apple resolves the SDK by re-running
+xcodebuild and we stay in process, so the leading "looking up SDK with"
+block of its trace is absent by design.  Our own xcodebuild -find notes
+("looking up with", "lookup resolved with") are emitted and match, since
+they describe a subprocess we really do run.
 
 Write-side parity (-s / -r) is NOT in these matrices: it must run as
 root and would rewrite real selection state.  It is covered by

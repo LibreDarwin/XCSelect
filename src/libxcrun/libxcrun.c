@@ -1636,6 +1636,15 @@ static char *xcodebuild_find_path(const char *name)
 		ssize_t len = getline(&line, &linecap, fp);
 		int cstatus = pclose(fp);
 
+		/*
+		 * The shipped library names the lookup it is about to run and
+		 * the answer it got back, both as notes: the command is what
+		 * was actually tried, and the answer is where the toolchain
+		 * placed the tool.  Both are exact, so they are part of the
+		 * -v trace rather than of the error reporting below.
+		 */
+		verbose_note("looking up with '%s'", cmd);
+
 		/* xcodebuild exits 70 for a tool it could not find. */
 		if (len > 0 && WIFEXITED(cstatus) && WEXITSTATUS(cstatus) == 0) {
 			while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
@@ -1643,7 +1652,9 @@ static char *xcodebuild_find_path(const char *name)
 			if (len > 0)
 				path = strdup(line);
 		}
-		if (path == NULL) {
+		if (path != NULL) {
+			verbose_note("lookup resolved with 'xcodebuild -find' to '%s'", path);
+		} else {
 			/*
 			 * The status is reported as pclose hands it back,
 			 * exit code shifted into the high half rather than
