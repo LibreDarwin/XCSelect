@@ -927,7 +927,13 @@ xcselect_invoke_xcrun(char *tool_name, int argc, char *argv[],
 	}
 
 	extra = (tool_name != NULL) ? 1 : 0;
-	if ((args = calloc((size_t)argc + extra + 1, sizeof(*args))) == NULL)
+	/*
+	 * The array is the path, an optional tool name, the tool's own
+	 * arguments and the NULL that ends it.  One too few slots puts the
+	 * terminator out of the allocation, where execv reads whatever the
+	 * heap left there instead of NULL and fails with EFAULT.
+	 */
+	if ((args = calloc((size_t)argc + extra + 2, sizeof(*args))) == NULL)
 		exit(1);
 	args[0] = path;
 	if (extra != 0)
