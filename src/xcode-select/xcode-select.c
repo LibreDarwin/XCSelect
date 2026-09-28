@@ -228,7 +228,9 @@ int main(int argc, char *argv[])
 
 	/* -h is answered where it is read, so it needs no flag of its own. */
 	static int version_f, switch_f, printpath_f, install_f, reset_f;
+	static int manpaths_f;
 	version_f = switch_f = printpath_f = install_f = reset_f = 0;
+	manpaths_f = 0;
 
 	static struct option options[] = {
 		{ "help", no_argument, 0, 'h' },
@@ -237,6 +239,7 @@ int main(int argc, char *argv[])
 		{ "print-path", no_argument, 0, 'p' },
 		{ "install", no_argument, 0, 'I' },
 		{ "reset", no_argument, 0, 'r' },
+		{ "show-manpaths", no_argument, 0, 'm' },
 		{ NULL, 0, 0, 0 }
 	};
 
@@ -270,6 +273,9 @@ int main(int argc, char *argv[])
 			case 'r':
 				reset_f = 1;
 				break;
+			case 'm':
+				manpaths_f = 1;
+				break;
 			case ':':
 				snprintf(complaint, sizeof(complaint),
 				    "missing argument to '%s'", argv[optind - 1]);
@@ -302,7 +308,7 @@ int main(int argc, char *argv[])
 	 */
 	{
 		int actions = (version_f != 0) + (printpath_f != 0) +
-		    (install_f != 0) + (reset_f != 0);
+		    (install_f != 0) + (reset_f != 0) + (manpaths_f != 0);
 
 		if (actions > 1)
 			usage("cannot execute multiple actions");
@@ -310,6 +316,35 @@ int main(int argc, char *argv[])
 
 	if (version_f == 1)
 		version();
+
+	/*
+	 * --show-manpaths is not in the help, and deliberately so: the shipped
+	 * tool answers it but does not advertise it, so advertising it here
+	 * would be a difference of its own.  It is a long option only, on the
+	 * same reasoning as --install.
+	 *
+	 * The pages are the active developer directory's, not the sysroot's, so
+	 * the sysroot argument is NULL: libxcselect takes it the way the shipped
+	 * library takes it and reports the same list either way.
+	 */
+	if (manpaths_f == 1) {
+		xcselect_manpaths *mp;
+		uint32_t i, n;
+
+		if ((mp = xcselect_get_manpaths(NULL)) == NULL) {
+			fprintf(stderr, "%s: error: unable to get manpaths\n",
+			    getprogname());
+			return 1;
+		}
+
+		n = xcselect_manpaths_get_num_paths(mp);
+		for (i = 0; i < n; i++)
+			fprintf(stdout, "%s\n",
+			    xcselect_manpaths_get_path(mp, i));
+
+		xcselect_manpaths_free(mp);
+		return 0;
+	}
 
 	if (printpath_f == 1) {
 		path = get_developer_path();
