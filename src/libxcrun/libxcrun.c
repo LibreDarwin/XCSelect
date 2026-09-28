@@ -477,6 +477,20 @@ static sdk_config get_sdk_info(const char *path)
 	memset(&config, 0, sizeof(config));
 
 	/*
+	 * No SDK at all is a thing the caller has already reported, and there
+	 * is no directory here to have failed to read: every field is simply
+	 * empty.  Saying "failed to retrieve sdk info from '(null)'" would
+	 * name a path that was never asked for.
+	 */
+	if (path == NULL) {
+		config.name = strdup("");
+		config.deployment_target = strdup("");
+		config.toolchain = strdup("");
+		config.default_arch = strdup("");
+		return config;
+	}
+
+	/*
 	 * Prefer SDKSettings.plist, which is what a stock SDK carries -- in
 	 * binary form there, XML in one we emit; sdkpath.c handles both.
 	 * An SDK in the older layout still answers through info.ini.
@@ -674,7 +688,14 @@ static const char *default_cfg_path(void)
 /**
  * @func get_sdk_path -- Return the specified sdk path
  * @arg name - name of the sdk
- * @return: absolute path of sdk on success, exit on failure
+ * @return: malloc'd path on success, NULL if the name locates no SDK
+ *
+ * A failure here is one attempt that did not find an SDK, and the shipped
+ * library says so once per attempt rather than once per command: --find
+ * resolves the SDK a single time and then goes on to look for the tool,
+ * while every --show-* option resolves it a second time to name the item
+ * it could not look up, and so is the one that stops.  Callers that need
+ * the SDK cannot have it report why on their behalf, so they say it.
  */
 static char *get_sdk_path(const char *name)
 {
@@ -708,19 +729,80 @@ static char *get_sdk_path(const char *name)
 		return path;
 
 	/*
-	 * A name that names no SDK.  Apple reports the SDK as not located
-	 * and then the item it could not look up in it, and where toolchains
-	 * are kept the locating is xcodebuild's -- with a result bundle and a
-	 * timestamp on every line, so that half is not reproduced here.
+	 * Only where the SDKs sit beside each other does the locating belong
+	 * to us.  Where toolchains are kept it is xcodebuild's, and it says
+	 * so itself -- with a result bundle and a timestamp on every line, so
+	 * that half is not reproduced here.
 	 */
-	if (devdir_has_toolchains()) {
-		fprintf(stderr, "xcrun: error: unable to lookup item 'Path' in SDK '%s'\n", name);
-	} else {
+	if (!devdir_has_toolchains())
 		fprintf(stderr, "xcrun: error: SDK \"%s\" cannot be located\n", name);
-		fprintf(stderr, "xcrun: error: SDK \"%s\" cannot be located\n", name);
-		fprintf(stderr, "xcrun: error: unable to lookup item 'Path' in SDK '%s'\n", name);
-	}
+
+	return NULL;
+}
+
+/**
+ * @func require_sdk_path -- get_sdk_path for a caller that cannot go on
+ * @arg name - name of the sdk
+ * @arg item - the SDK item being asked for, named in the error
+ * @return: malloc'd path; does not return if the name locates no SDK
+ *
+ * A --show-* option is only ever about the SDK, so there is nothing left
+ * to do once the SDK is not there: the item that could not be looked up
+ * is what the command actually asked for, and it is named as such.
+ */
+static char *require_sdk_path(const char *name, const char *item)
+{
+	char *path = get_sdk_path(name);
+
+	if (path != NULL)
+		return path;
+
+	/*
+	 * Naming the item that could not be looked up is itself a lookup in
+	 * the same SDK, so the SDK is reported as not located a second time
+	 * here -- the shipped library looks it up again rather than
+	 * remembering the answer, and a run of this option shows two
+	 * "cannot be located" lines where a run of a tool shows one.
+	 */
+	(void)get_sdk_path(name);
+	fprintf(stderr, "xcrun: error: unable to lookup item '%s' in SDK '%s'\n", item, name);
 	exit(1);
+}
+
+/**
+ * @func sdk_path_or_null -- get_sdk_path for a caller that may not have one
+ * @arg name - name of the sdk
+ * @return: malloc'd path, or NULL; never exits
+ *
+ * For the environment a tool is run with.  SDKROOT, the target triple and
+ * the deployment target are all read from the SDK, and an SDK that is not
+ * there simply leaves those unset rather than stopping a tool that has
+ * nothing to do with it -- the SDK has already said that it is not there.
+ */
+static char *sdk_path_or_null(const char *name)
+{
+	static char *cached_name = NULL;
+	static char *cached_path = NULL;
+	static int tried = 0;
+	char *path;
+
+	/*
+	 * These three callers are one question asked three times, and the
+	 * shipped library answers it once: a run against an SDK that is not
+	 * there reports that SDK once, not once per variable.
+	 */
+	if (tried && strcmp(cached_name, name) == 0)
+		return (cached_path == NULL) ? NULL : strdup(cached_path);
+
+	path = get_sdk_path(name);
+
+	free(cached_name);
+	free(cached_path);
+	cached_name = strdup(name);
+	cached_path = (path == NULL) ? NULL : strdup(path);
+	tried = 1;
+
+	return path;
 }
 
 /**
@@ -836,10 +918,17 @@ static char *get_target_triple(const char *current_sdk)
 	else {
 		triple = (char *)malloc(64);
 
-		if ((default_arch = strdup(get_sdk_info(get_sdk_path(current_sdk)).default_arch)) == NULL)
+		/*
+		 * No SDK means no triple, which is a variable this cannot
+		 * supply rather than a reason to refuse to try.
+		 */
+		if (sdk_path_or_null(current_sdk) == NULL)
 			return NULL;
 
-		if ((deployment_target = strdup(get_sdk_info(get_sdk_path(current_sdk)).deployment_target)) == NULL)
+		if ((default_arch = strdup(get_sdk_info(sdk_path_or_null(current_sdk)).default_arch)) == NULL)
+			return NULL;
+
+		if ((deployment_target = strdup(get_sdk_info(sdk_path_or_null(current_sdk)).deployment_target)) == NULL)
 			return NULL;
 
 		parse_target_triple(triple, deployment_target, default_arch);
@@ -859,6 +948,7 @@ static int call_command(const char *cmd, int argc, char *argv[])
 {
 	int i, n = 0;
 	char *envp[8];
+	char *sdk = NULL;
 	char *target_triple = NULL;
 	const char *deployment_target = NULL;
 	const char *path_env = NULL;
@@ -888,8 +978,16 @@ static int call_command(const char *cmd, int argc, char *argv[])
 	path_env = getenv("PATH");
 	home_env = getenv("HOME");
 
-	if (asprintf(&envp[n], "SDKROOT=%s", get_sdk_path(current_sdk)) != (-1))
-		n++;
+	/*
+	 * SDKROOT is only worth setting to something.  A tool run against an
+	 * SDK that is not there is given the rest of its environment
+	 * without it, rather than being handed an empty one.
+	 */
+	if ((sdk = sdk_path_or_null(current_sdk)) != NULL) {
+		if (asprintf(&envp[n], "SDKROOT=%s", sdk) != (-1))
+			n++;
+		free(sdk);
+	}
 	if (asprintf(&envp[n], "PATH=%s/usr/bin:%s/usr/bin:%s", developer_dir,
 		     get_toolchain_path(current_toolchain),
 		     (path_env != NULL) ? path_env : "") != (-1))
@@ -914,7 +1012,7 @@ static int call_command(const char *cmd, int argc, char *argv[])
 			n++;
 	} else {
 		/* Use the deployment target info that is provided by the SDK. */
-		deployment_target = get_sdk_info(get_sdk_path(current_sdk)).deployment_target;
+		deployment_target = get_sdk_info(sdk_path_or_null(current_sdk)).deployment_target;
 		if (deployment_target != NULL) {
 			if (macosx_deployment_target_set == 1) {
 				if (asprintf(&envp[n], "MACOSX_DEPLOYMENT_TARGET=%s", deployment_target) != (-1))
@@ -1066,8 +1164,17 @@ static char *xcodebuild_find_path(const char *name)
 	if (alternate_sdk_path != NULL) {
 		if (asprintf(&sdk, "%s", alternate_sdk_path) == -1)
 			return NULL;
-	} else {
-		sdk = get_sdk_path(current_sdk);
+	} else if ((sdk = sdk_path_or_null(current_sdk)) == NULL) {
+		/*
+		 * The SDK does not resolve, but xcodebuild is what says so
+		 * there, and it wants the name that was asked for rather than
+		 * a default standing in for it.  Handing it the name lets it
+		 * report the same SDK as the search did.
+		 */
+		if (asprintf(&sdk, "%s", current_sdk) == -1) {
+			free(xcodebuild);
+			return NULL;
+		}
 	}
 	if (asprintf(&cmd, "%s -sdk %s -find %s 2> /dev/null", xcodebuild, sdk, name) == -1) {
 		free(sdk);
@@ -1176,10 +1283,21 @@ static int request_command(const char *name, int argc, char *argv[])
 		 * default, but one that is not there at all brings none:
 		 * a developer dir that has a toolchain is not a reason to
 		 * answer for an SDK that was asked for by name.
+		 *
+		 * An SDK that resolves to nothing is not the end of it.  The
+		 * SDK has said so; the tool being asked for is named by
+		 * something else entirely, and the shipped library goes on
+		 * looking for it, so this leaves the search empty rather
+		 * than stopping, and the tools further down still answer.
 		 */
-		toolch_name = sdk_toolchain_name(get_sdk_path(current_sdk));
-		if (toolch_name == NULL && validate_directory_path(get_sdk_path(current_sdk)) != (-1))
-			toolch_name = current_toolchain;
+		char *sdk = sdk_path_or_null(current_sdk);
+
+		if (sdk != NULL) {
+			toolch_name = sdk_toolchain_name(sdk);
+			if (toolch_name == NULL && validate_directory_path(sdk) != (-1))
+				toolch_name = current_toolchain;
+			free(sdk);
+		}
 		if (toolch_name != NULL)
 			sprintf(search_string, "%s/usr/bin", get_toolchain_path(toolch_name));
 	} else if (explicit_toolchain_mode == 1) {
@@ -1526,16 +1644,16 @@ static int xcrun_parse_args(int argc, char *argv[])
 	 */
 	switch (show_kind) {
 		case SHOW_SDK_PATH:
-			printf("%s\n", get_sdk_path(current_sdk));
+			printf("%s\n", require_sdk_path(current_sdk, "Path"));
 			exit(0);
 
 		case SHOW_SDK_VERSION:
 			/* Apple's xcrun prints the bare version and nothing else. */
-			printf("%s\n", get_sdk_info(get_sdk_path(current_sdk)).version);
+			printf("%s\n", get_sdk_info(require_sdk_path(current_sdk, "SDKVersion")).version);
 			exit(0);
 
 		case SHOW_SDK_BUILD_VERSION: {
-			char *build = xt_sdk_build_version(get_sdk_path(current_sdk));
+			char *build = xt_sdk_build_version(require_sdk_path(current_sdk, "ProductBuildVersion"));
 
 			if (build == NULL) {
 				fprintf(stderr, "xcrun: error: no build version for SDK '%s'.\n",
@@ -1548,16 +1666,18 @@ static int xcrun_parse_args(int argc, char *argv[])
 		}
 
 		case SHOW_SDK_PLATFORM_PATH: {
-			char *platform = xt_sdk_platform_path(get_sdk_path(current_sdk));
+			char *sdk = require_sdk_path(current_sdk, "PlatformPath");
+			char *platform = xt_sdk_platform_path(sdk);
 
 			if (platform == NULL) {
 				/*
 				 * The Command Line Tools keep their SDKs outside
 				 * any platform bundle, so there is no platform to
 				 * name -- which is what this says, rather than
-				 * complaining about the SDK.  Apple then goes on to
-				 * say that too, so that the SDK it did consult is
-				 * named either way.
+				 * complaining about the SDK.  The SDK it did
+				 * consult is named either way, and naming it
+				 * resolves the SDK a second time, which is the
+				 * other half of what Apple prints here.
 				 */
 				fprintf(stderr, "xcrun: error: unable to lookup item 'PlatformPath' from command line tools installation\n");
 				fprintf(stderr, "xcrun: error: unable to lookup item 'PlatformPath' in SDK '%s'\n", get_sdk_path(current_sdk));
@@ -1569,7 +1689,8 @@ static int xcrun_parse_args(int argc, char *argv[])
 		}
 
 		case SHOW_SDK_PLATFORM_VERSION: {
-			char *platform = xt_sdk_platform_path(get_sdk_path(current_sdk));
+			char *sdk = require_sdk_path(current_sdk, "PlatformVersion");
+			char *platform = xt_sdk_platform_path(sdk);
 			char *version = NULL;
 
 			if (platform != NULL) {
