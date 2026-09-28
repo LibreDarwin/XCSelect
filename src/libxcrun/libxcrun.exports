@@ -1,0 +1,27 @@
+# Copyright (C) 2026, LibreDarwin
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# The exported surface of libxcrun.  The shipped library publishes four
+# symbols and nothing else, so the helpers this one shares with the xcrun
+# tool -- the ini, json, cfplist and sdkpath readers -- stay internal.
+#
+# Nothing declares these in a header either.  libxcselect dlopens the
+# library and reaches each one by name, because the call is by dlsym and
+# so carries no type:
+#
+#	void xcrun_main(char *tool_name, int argc, char *argv[],
+#	    const char *devdir);
+#	void xcrun_iter_manpaths(const char *devdir, const char *sysroot,
+#	    void (^iter)(const char *path));
+#	const char *xcrun_get_version(void);
+#	void xcrun_set_unknown_utility_handler(void (^)(const char *));
+#
+# ld's format for this file is one symbol per line, with "#" starting a
+# comment to end of line.  There is no "global:" or "local:" section and
+# no wildcard: the list says exactly what is exported, and a symbol in the
+# source that is not named here is not published.  C block comments would
+# be read as symbol names, so this file uses "#" throughout.
+_xcrun_main
+_xcrun_iter_manpaths
+_xcrun_get_version
+_xcrun_set_unknown_utility_handler

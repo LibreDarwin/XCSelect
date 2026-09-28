@@ -30,7 +30,8 @@ OBJDIR    := $(BUILD_DIR)/obj
 # -fblocks: libxcrun hands xcselect a block for utilities it does not know,
 # so the handler registered with it has to be a real block.
 CFLAGS := $(OPT) -std=c11 -D_DARWIN_C_SOURCE -isysroot "$(SDK)" -Wall -Wextra \
-	  -Wno-unused-parameter -fblocks -I src/common -I src/libxcselect -I src/xcrun
+	  -Wno-unused-parameter -fblocks -I src/common -I src/libxcselect \
+	  -I src/xcrun -I src/libxcrun
 
 # Apple's libxcselect is a 1.0.0 dylib, so match the version stamps.
 DYLIB_VERSION := 1.0.0
@@ -61,6 +62,20 @@ RPATHS := -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../lib \
 LIB      := $(BUILD_DIR)/libxcselect.dylib
 LIB_OBJS := $(OBJDIR)/libxcselect.o
 
+# libxcrun is the other half of xcrun.  Apple's /usr/bin/xcrun is a shim
+# that links only libxcselect and libSystem and imports nothing from
+# libxcrun by name: libxcselect dlopens <developer dir>/usr/lib/libxcrun.dylib
+# and calls xcrun_main in it, and that is also how it gets a developer
+# directory's manpath list.  Each developer directory ships its own copy, so
+# this installs to $(DEVDIR)/usr/lib rather than beside libxcselect.
+#
+# It carries the same vendored common/ reader xcrun does -- cfplist.c is the
+# CoreFoundation property list reader sdkpath.c asks for the plists in.
+LIBXCRUN      := $(BUILD_DIR)/libxcrun.dylib
+LIBXCRUN_OBJS := $(OBJDIR)/libxcrun.o $(OBJDIR)/ini.o $(OBJDIR)/sdkpath.o \
+		 $(OBJDIR)/cfplist.o $(OBJDIR)/json.o
+LIBXCRUN_INSTALL_NAME := @rpath/libxcrun.dylib
+
 # xcrun carries the vendored common/ SDK-settings reader with it; every one of
 # these objects is reached, none is dead weight.  devpath.c is the one common/
 # file xcrun does not need: it includes devpath.h but never calls into it.
@@ -73,7 +88,7 @@ XCRUN_OBJS := $(OBJDIR)/xcrun.o $(OBJDIR)/ini.o $(OBJDIR)/sdkpath.o \
 XSELECT      := $(BUILD_DIR)/xcode-select
 XSELECT_OBJS := $(OBJDIR)/xcode-select.o
 
-all: $(LIB) $(XCRUN) $(XSELECT)
+all: $(LIB) $(LIBXCRUN) $(XCRUN) $(XSELECT)
 
 $(LIB): $(LIB_OBJS)
 	@mkdir -p $(BUILD_DIR)
@@ -81,6 +96,20 @@ $(LIB): $(LIB_OBJS)
 	    -install_name $(LIB_INSTALL_NAME) \
 	    -current_version $(DYLIB_VERSION) \
 	    -compatibility_version $(DYLIB_COMPAT)
+
+# Installed to $(DEVDIR)/usr/lib and loaded from there by path, so the
+# identity is a convenience for anything that links it directly rather than
+# something that has to resolve.  Like libxcselect it deliberately does not
+# link libxcselect: libxcselect is what finds and calls into this, and a
+# link-time dependency would be a cycle.
+$(LIBXCRUN): $(LIBXCRUN_OBJS) src/libxcrun/libxcrun.exports
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -dynamiclib -o $@ $(LIBXCRUN_OBJS) \
+	    -install_name $(LIBXCRUN_INSTALL_NAME) \
+	    -current_version $(DYLIB_VERSION) \
+	    -compatibility_version $(DYLIB_COMPAT) \
+	    -Wl,-exported_symbols_list,src/libxcrun/libxcrun.exports \
+	    -framework CoreFoundation
 
 $(XCRUN): $(XCRUN_OBJS) $(LIB)
 	@mkdir -p $(BUILD_DIR)
@@ -94,6 +123,12 @@ $(XSELECT): $(XSELECT_OBJS) $(LIB)
 $(OBJDIR)/libxcselect.o: src/libxcselect/libxcselect.c src/libxcselect/xcselect.h
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ src/libxcselect/libxcselect.c
+
+$(OBJDIR)/libxcrun.o: src/libxcrun/libxcrun.c src/xcrun/ini.h \
+                      src/common/devpath.h src/common/sdkpath.h \
+                      src/libxcselect/xcselect.h
+	@mkdir -p $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ src/libxcrun/libxcrun.c
 
 $(OBJDIR)/xcrun.o: src/xcrun/xcrun.c src/xcrun/ini.h src/common/devpath.h \
                    src/common/sdkpath.h src/libxcselect/xcselect.h
@@ -126,7 +161,17 @@ install: all
 	install -m 0755 $(XSELECT) $(DESTDIR)$(PREFIX)/bin/xcode-select
 	install -m 0755 $(LIB) $(DESTDIR)$(LIBDIR)/libxcselect.dylib
 
+# libxcrun belongs to a developer directory rather than to a prefix: it is
+# found at <developer dir>/usr/lib/libxcrun.dylib and loaded from there by
+# path, and its presence is what marks a directory as a real toolchain.  So
+# it installs into a developer directory when one is named, and is otherwise
+# left out of a prefix install rather than put somewhere nothing looks.
+install-libxcrun: all
+	@test -n "$(DEVDIR)" || { echo "DEVDIR is not set: nothing to install libxcrun into" >&2; exit 1; }
+	install -d $(DESTDIR)$(DEVDIR)/usr/lib
+	install -m 0755 $(LIBXCRUN) $(DESTDIR)$(DEVDIR)/usr/lib/libxcrun.dylib
+
 clean:
 	rm -rf build
 
-.PHONY: all install clean
+.PHONY: all install install-libxcrun clean

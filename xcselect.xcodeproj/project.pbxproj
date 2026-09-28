@@ -14,6 +14,11 @@
 		FE0000000000000000000006 /* cfplist.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000022 /* cfplist.c */; };
 		FE0000000000000000000007 /* json.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000024 /* json.c */; };
 		FE000000000000000000000A /* xcode-select.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000018 /* xcode-select.c */; };
+		FE000000000000000000000B /* libxcrun.c in Sources */ = {isa = PBXBuildFile; fileRef = FE000000000000000000002A /* libxcrun.c */; };
+		FE000000000000000000000C /* ini.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000015 /* ini.c */; };
+		FE000000000000000000000D /* sdkpath.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000020 /* sdkpath.c */; };
+		FE000000000000000000000E /* cfplist.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000022 /* cfplist.c */; };
+		FE000000000000000000000F /* json.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000024 /* json.c */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -51,6 +56,9 @@
 		FE0000000000000000000025 /* json.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = json.h; sourceTree = "<group>"; };
 		FE0000000000000000000028 /* devpath.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = devpath.c; sourceTree = "<group>"; };
 		FE0000000000000000000029 /* devpath.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = devpath.h; sourceTree = "<group>"; };
+		FE000000000000000000002A /* libxcrun.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = libxcrun.c; sourceTree = "<group>"; };
+		FE000000000000000000002B /* libxcrun.exports */ = {isa = PBXFileReference; lastKnownFileType = text; path = libxcrun.exports; sourceTree = "<group>"; };
+		FE000000000000000000002C /* libxcrun.dylib */ = {isa = PBXFileReference; explicitFileType = compiled.mach-o.dylib; includeInIndex = 0; path = libxcrun.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -75,6 +83,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FE0000000000000000000047 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -90,6 +105,7 @@
 			isa = PBXGroup;
 			children = (
 				FE0000000000000000000013 /* libxcselect.dylib */,
+				FE000000000000000000002C /* libxcrun.dylib */,
 				FE0000000000000000000017 /* xcrun */,
 				FE0000000000000000000019 /* xcode-select */,
 			);
@@ -100,6 +116,7 @@
 			isa = PBXGroup;
 			children = (
 				FE0000000000000000000034 /* libxcselect */,
+				FE0000000000000000000037 /* libxcrun */,
 				FE0000000000000000000035 /* xcrun */,
 				FE0000000000000000000036 /* xcode-select */,
 				FE0000000000000000000033 /* common */,
@@ -129,6 +146,15 @@
 				FE0000000000000000000012 /* xcselect.h */,
 			);
 			path = libxcselect;
+			sourceTree = "<group>";
+		};
+		FE0000000000000000000037 /* libxcrun */ = {
+			isa = PBXGroup;
+			children = (
+				FE000000000000000000002A /* libxcrun.c */,
+				FE000000000000000000002B /* libxcrun.exports */,
+			);
+			path = libxcrun;
 			sourceTree = "<group>";
 		};
 		FE0000000000000000000035 /* xcrun */ = {
@@ -166,6 +192,22 @@
 			name = libxcselect;
 			productName = libxcselect;
 			productReference = FE0000000000000000000013 /* libxcselect.dylib */;
+			productType = "com.apple.product-type.library.dynamic";
+		};
+		FE0000000000000000000053 /* libxcrun */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FE0000000000000000000084 /* Build configuration list for PBXNativeTarget "libxcrun" */;
+			buildPhases = (
+				FE0000000000000000000046 /* Sources */,
+				FE0000000000000000000047 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = libxcrun;
+			productName = libxcrun;
+			productReference = FE000000000000000000002C /* libxcrun.dylib */;
 			productType = "com.apple.product-type.library.dynamic";
 		};
 		FE0000000000000000000051 /* xcrun */ = {
@@ -225,6 +267,7 @@
 			projectRoot = "";
 			targets = (
 				FE0000000000000000000050 /* libxcselect */,
+				FE0000000000000000000053 /* libxcrun */,
 				FE0000000000000000000051 /* xcrun */,
 				FE0000000000000000000052 /* xcode-select */,
 			);
@@ -257,6 +300,18 @@
 			buildActionMask = 2147483647;
 			files = (
 				FE000000000000000000000A /* xcode-select.c in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FE0000000000000000000046 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FE000000000000000000000B /* libxcrun.c in Sources */,
+				FE000000000000000000000C /* ini.c in Sources */,
+				FE000000000000000000000D /* sdkpath.c in Sources */,
+				FE000000000000000000000E /* cfplist.c in Sources */,
+				FE000000000000000000000F /* json.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -495,6 +550,73 @@
 			};
 			name = Release;
 		};
+		FE0000000000000000000079 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DYLIB_COMPATIBILITY_VERSION = 1.0.0;
+				DYLIB_CURRENT_VERSION = 1.0.0;
+				EXECUTABLE_PREFIX = "";
+				EXPORTED_SYMBOLS_FILE = "$(SRCROOT)/src/libxcrun/libxcrun.exports";
+				GCC_C_LANGUAGE_STANDARD = c11;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/src/common",
+					"$(SRCROOT)/src/xcrun",
+				);
+				LD_DYLIB_INSTALL_NAME = "@rpath/libxcrun.dylib";
+				MACH_O_TYPE = mh_dylib;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				OTHER_CFLAGS = (
+					"-D_DARWIN_C_SOURCE",
+					"-Wall",
+					"-Wextra",
+					"-Wno-unused-parameter",
+					"-fblocks",
+				);
+				OTHER_LDFLAGS = (
+					"-framework",
+					CoreFoundation,
+				);
+				PRODUCT_NAME = libxcrun;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		FE000000000000000000007A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				DYLIB_COMPATIBILITY_VERSION = 1.0.0;
+				DYLIB_CURRENT_VERSION = 1.0.0;
+				EXECUTABLE_PREFIX = "";
+				EXPORTED_SYMBOLS_FILE = "$(SRCROOT)/src/libxcrun/libxcrun.exports";
+				GCC_C_LANGUAGE_STANDARD = c11;
+				GCC_OPTIMIZATION_LEVEL = 3;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/src/common",
+					"$(SRCROOT)/src/xcrun",
+				);
+				LD_DYLIB_INSTALL_NAME = "@rpath/libxcrun.dylib";
+				MACH_O_TYPE = mh_dylib;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				OTHER_CFLAGS = (
+					"-D_DARWIN_C_SOURCE",
+					"-Wall",
+					"-Wextra",
+					"-Wno-unused-parameter",
+					"-fblocks",
+				);
+				OTHER_LDFLAGS = (
+					"-framework",
+					CoreFoundation,
+				);
+				PRODUCT_NAME = libxcrun;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -530,6 +652,15 @@
 			buildConfigurations = (
 				FE0000000000000000000077 /* Debug */,
 				FE0000000000000000000078 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FE0000000000000000000084 /* Build configuration list for PBXNativeTarget "libxcrun" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FE0000000000000000000079 /* Debug */,
+				FE000000000000000000007A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
