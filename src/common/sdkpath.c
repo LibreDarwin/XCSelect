@@ -52,48 +52,6 @@ build_path(const char *a, const char *b, const char *c, const char *d)
  * name works on a case-sensitive volume, where the literal lookup fails
  * and the canonical-name search below answers instead.
  */
-static char *
-dup_real_path(const char *path)
-{
-	char resolved[PATH_MAX];
-
-	if (realpath(path, resolved) != NULL)
-		return strdup(resolved);
-
-	return strdup(path);
-}
-
-static char *
-find_sdk_in_platforms(const char *devdir, const char *name)
-{
-	char platforms[PATH_MAX], candidate[PATH_MAX];
-	struct dirent *e;
-	DIR *d;
-	char *found = NULL;
-
-	snprintf(platforms, sizeof(platforms), "%s/Platforms", devdir);
-	if ((d = opendir(platforms)) == NULL)
-		return NULL;
-
-	while ((e = readdir(d)) != NULL) {
-		size_t len = strlen(e->d_name);
-
-		if (len < 10 || strcmp(e->d_name + len - 9, ".platform") != 0)
-			continue;
-
-		snprintf(candidate, sizeof(candidate),
-			 "%s/%s/Developer/SDKs/%s.sdk",
-			 platforms, e->d_name, name);
-		if (is_dir(candidate)) {
-			found = dup_real_path(candidate);
-			break;
-		}
-	}
-
-	closedir(d);
-	return found;
-}
-
 /*
  * Whether a name carries a version, as in macosx26.5 or iphoneos18.0.
  */
@@ -122,6 +80,12 @@ name_has_version(const char *name)
  * "macosx26.5.internal" and asking for the plain macOS SDK could hand
  * back the internal one.
  *
+ * The match is exact, and case counts: "macosx" and "macosx26.5" are
+ * names, "MacOSX" and "MacOSX26.5" are not.  There is a directory by
+ * that second spelling, and asking for it by that name locates nothing
+ * -- the name and the directory are two different things, and only the
+ * directory answers to a path.
+ *
  * A family name has to spell its version out in full to be answered by
  * it.  "macosx26.5" is the whole version of that SDK and matches it,
  * but "macosx26" and "macosx15" name a release that is not installed --
@@ -138,14 +102,14 @@ canonical_matches(const char *canonical, const char *name, int family_ok)
 	if (canonical == NULL || name == NULL)
 		return 0;
 
-	if (strcasecmp(canonical, name) == 0)
+	if (strcmp(canonical, name) == 0)
 		return 1;
 
 	if (!family_ok)
 		return 0;
 
 	n = strlen(name);
-	if (strncasecmp(canonical, name, n) != 0)
+	if (strncmp(canonical, name, n) != 0)
 		return 0;
 
 	/*
@@ -199,36 +163,6 @@ named_for_canonical(const char *sdkpath, const char *canonical)
 
 	return strlen(canonical) == len - 4 &&
 	    strncasecmp(base, canonical, len - 4) == 0;
-}
-
-/*
- * Whether a bundle found by its directory is the one the name asked for.
- *
- * A name that says no version finds any bundle.  A versioned name has to
- * be spelled out by the bundle itself: a link named MacOSX15.sdk
- * answering "macosx15" is a different release's bundle wearing the wrong
- * name, and is not what was asked for.
- */
-static int
-directory_answers_name(const char *sdkpath, const char *name)
-{
-	char *real;
-	int answers;
-
-	if (!name_has_version(name))
-		return 1;
-
-	/*
-	 * Asked after where the directory actually leads, because a link is
-	 * not the bundle it points at.  CLT answers "macosx15" with nothing
-	 * even though MacOSX15.sdk sits right there, since that link leads to
-	 * MacOSX15.4.sdk and 15.4 is the only version installed.
-	 */
-	real = dup_real_path(sdkpath);
-	answers = named_for_canonical(real != NULL ? real : sdkpath, name);
-	free(real);
-
-	return answers;
 }
 
 static void
@@ -355,8 +289,19 @@ xt_find_sdk(const char *devdir, const char *name)
 {
 	struct canonical_search search;
 	char *path;
+	size_t len;
 
 	if (devdir == NULL || name == NULL)
+		return NULL;
+
+	/*
+	 * "macosx26.5.sdk" is a directory's spelling of itself, and asking
+	 * for it locates nothing.  A bundle is named either by a name it
+	 * answers to or by a path; this is neither, being the two joined
+	 * together.  Apple has no SDK by that name and says so, which is why
+	 * the extension is not stripped off and taken for a versioned name.
+	 */
+	if ((len = strlen(name)) >= 4 && strcmp(name + len - 4, ".sdk") == 0)
 		return NULL;
 
 	/*
@@ -367,7 +312,7 @@ xt_find_sdk(const char *devdir, const char *name)
 	 * for "macosx" came back with its 15.4 SDK while the default is
 	 * the 26.5 one it points at.
 	 */
-	if (!name_has_version(name) && strcasecmp(name, "macosx") == 0) {
+	if (!name_has_version(name) && strcmp(name, "macosx") == 0) {
 		if ((path = default_macosx_for_unversioned_name(devdir)) != NULL)
 			return path;
 	}
@@ -385,8 +330,8 @@ xt_find_sdk(const char *devdir, const char *name)
 	 * the default is not, macosx15.4 against a 26.5 default, is a
 	 * different SDK and is reported under the directory it lives in.
 	 */
-	if (strncasecmp(name, "macosx", 6) == 0 && name[6] != '\0' &&
-	    strcasecmp(name + 6, version_of_default_macosx(devdir)) == 0) {
+	if (strncmp(name, "macosx", 6) == 0 && name[6] != '\0' &&
+	    strcmp(name + 6, version_of_default_macosx(devdir)) == 0) {
 		if ((path = default_macosx_for_unversioned_name(devdir)) != NULL)
 			return path;
 	}
@@ -421,35 +366,15 @@ xt_find_sdk(const char *devdir, const char *name)
 		return search.found;
 
 	/*
-	 * Nothing here calls itself that, so look for a bundle named for the
-	 * directory it is in.  An SDK that carries no SDKSettings.plist to be
-	 * named by can only be found this way.
-	 *
-	 * A versioned name still has to be the whole of the version here, or
-	 * the links an installation keeps beside its SDKs answer for names
-	 * that are not installed: CLT carries MacOSX15.sdk and MacOSX26.sdk
-	 * as links to the 15.4 and 26.5 bundles, and asking for "macosx15" or
-	 * "macosx26" must not be answered by them, the same way the canonical
-	 * names above refused to answer them.  The check is on the directory
-	 * found rather than on the name asked for, since a bundle that is not
-	 * a link and not named for its own version is not the name either.
+	 * Nothing answers that name, and nothing else is asked.  A directory
+	 * is not a name: "MacOSX26.5" is how one bundle's directory is
+	 * spelled, and asking for it locates nothing even where that
+	 * directory is right there, because no SDK calls itself that.  So
+	 * there is no second attempt by directory name here, and a bundle
+	 * carrying no SDKSettings.plist is reached by a path, which is what
+	 * a path is for -- it could not be looked inside of either, and
+	 * would have nothing to answer --show-sdk-path with.
 	 */
-	if ((path = find_sdk_in_platforms(devdir, name)) != NULL) {
-		if (directory_answers_name(path, name))
-			return path;
-		free(path);
-	}
-
-	/* The flat layout this project used before. */
-	path = build_path(devdir, "/SDKs/", name, ".sdk");
-	if (path != NULL && is_dir(path) && directory_answers_name(path, name)) {
-		char *real = dup_real_path(path);
-
-		free(path);
-		return real;
-	}
-	free(path);
-
 	return NULL;
 }
 
