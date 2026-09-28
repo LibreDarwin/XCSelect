@@ -59,6 +59,8 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+extern char **environ;
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -163,6 +165,14 @@ static void (^unknown_utility_handler)(const char *) = NULL;
 static char *alternate_sdk_path = NULL;
 static char *alternate_toolchain_path = NULL;
 
+/*
+ * The --toolchain argument as it was written.  TOOLCHAINS is that text
+ * verbatim, and it is the only place the distinction survives: a short
+ * name is stripped of its extension for searching, a path is turned
+ * into a toolchain search path, and neither is what TOOLCHAINS says.
+ */
+static const char *requested_toolchain = NULL;
+
 /* Our program's name as called by the user */
 static char *progname;
 
@@ -170,16 +180,21 @@ static char *progname;
 #define XCRUN_NAME_MAX 255
 
 /*
- * Copy a name, dropping a bundle suffix if it carries one, so that both
- * "MacOSX" and "MacOSX.sdk" name the same SDK.
+ * A toolchain is named by its directory or by its bundle, and both
+ * spellings mean the same toolchain, so a bundle suffix is dropped to find
+ * them together.
  *
  * Only a known suffix, and only at the end.  A name is full of dots that
  * carry meaning: cutting at the first one turns "macosx26.5" into
  * "macosx26", which matches no SDK at all, and "MacOSX.Internal" into
  * "MacOSX" -- which matches the public SDK, so asking for the internal
  * one would quietly get the wrong SDK instead of an error.
+ *
+ * An SDK has no such trimming.  Named by path it is that path, and named
+ * by name it is looked up exactly as it was written, because "MacOSX26.5"
+ * and "MacOSX26.5.sdk" are not two spellings of one question -- the first
+ * is a name and the second names nothing at all.
  */
-static const char *const sdk_exts[] = { ".sdk", NULL };
 static const char *const toolchain_exts[] = { ".xctoolchain", ".toolchain", NULL };
 
 /*
@@ -841,136 +856,388 @@ static char *sdk_path_or_null(const char *name)
 	return path;
 }
 
-/**
- * @func parse_target_triple -- Generate target triple by parsing iOS/MacOSX version and cpu architecture
- * @arg triple - buffer to place the target triple
- * @arg ver - Mac OSX or iOS version
- * @arg arch - Mac OSX or iOS cpu architecture
+/*
+ * parse_target_triple() and get_target_triple() are gone.  They built the
+ * TARGET_TRIPLE that this used to hand every tool, which Apple does not
+ * set: asked for the environment of a tool, Apple names SDKROOT, MANPATH,
+ * CPATH, LIBRARY_PATH and a deployment target, and nothing else.
  */
-static void parse_target_triple(char *triple, const char *ver, const char *arch)
+
+/**
+ * @func sdk_platform_dir -- the platform bundle an SDK is laid out in
+ * @arg devdir - the developer directory in effect
+ * @arg sdk - the SDK's path
+ * @return: the ".../Platforms/<name>.platform" directory, or NULL
+ *
+ * A full Xcode keeps each SDK inside its platform, which is how the
+ * platform is found: the name in the path is read off rather than
+ * guessed, so a platform bundle this source has never heard of is
+ * reported as itself.  A Command Line Tools directory has no Platforms
+ * at all, and says nothing here.
+ *
+ * It has to be a platform of *this* developer directory.  An SDK handed
+ * over by path can come from anywhere, and one from another Xcode is not
+ * part of this installation: asked to run against an iPhoneOS SDK from
+ * elsewhere, with a Command Line Tools directory in effect, Apple's
+ * manual page path names the SDK's own pages and no platform at all.
+ */
+static char *sdk_platform_dir(const char *devdir, const char *sdk)
 {
-	int where = 1;
-	int xx, yy, zz, ch, kern_ver;
+	static const char marker[] = "/Platforms/";
+	const char *name, *end;
+	char *here;
+	size_t len;
 
-	if (ver == NULL)
-		return;
+	if (sdk == NULL || (len = strlen(devdir)) == 0)
+		return NULL;
 
-	xx = yy = zz = 0;
-
-	do {
-		ch = (int)*ver;
-
-		switch (ch) {
-			case '9':
-			case '8':
-			case '7':
-			case '6':
-			case '5':
-			case '4':
-			case '3':
-			case '2':
-			case '1':
-			case '0':
-				{
-					switch (where) {
-						case 1: /* major */
-							xx *= 10;
-							xx += (ch - '0');
-							break;
-						case 2: /* minor */
-							yy *= 10;
-							yy += (ch - '0');
-							break;
-						case 3: /* patch */
-							zz *= 10;
-							zz += (ch - '0');
-						default:
-							break;
-					}
-					break;
-				}
-			case '.':
-			default:
-				where++;
-				break;
-		}
-	} while (*ver++ != '\0');
-
-	switch (xx) {
-		case 10:
-			kern_ver = (yy + 4);
-			break;
-		case 9:
-		case 8:
-			kern_ver = 14;
-			break;
-		case 7:
-			kern_ver = 14;
-			break;
-		case 6:
-			kern_ver = 13;
-			break;
-		case 5:
-			kern_ver = 11;
-			break;
-		case 4:
-			{
-				if (yy <= 2)
-					kern_ver = 10;
-				else
-					kern_ver = 11;
-				break;
-			}
-		case 3:
-			kern_ver = 10;
-			break;
-		case 2:
-			kern_ver = 9;
-			break;
-		case 1:
-		default:
-			kern_ver = 9;
-			break;
+	if (asprintf(&here, "%s%s", devdir, marker) < 0)
+		return NULL;
+	if (strncmp(sdk, here, strlen(here)) != 0) {
+		free(here);
+		return NULL;
 	}
+	free(here);
 
-	sprintf(triple, "%s-apple-darwin%d", arch, kern_ver);
+	name = sdk + len + sizeof(marker) - 1;
+	if ((end = strstr(name, ".platform/")) == NULL)
+		return NULL;
 
-	return;
+	return strndup(sdk, (size_t)(end - sdk) + sizeof(".platform") - 1);
 }
 
 /**
- * @func get_target_triple -- get the target triple for the current sdk.
- * @arg current_sdk - specified sdk (ignored if TARGET_TRIPLE env variable is set)
- * @return: target triple string or NULL on error
+ * @func sdk_dir_name -- the name of the directory an SDK is
+ * @arg sdk - the SDK's path, or NULL
+ * @return: the last path component, borrowed from sdk
  */
-static char *get_target_triple(const char *current_sdk)
+static const char *sdk_dir_name(const char *sdk)
 {
-	char *triple = NULL;
-	char *default_arch = NULL;
-	char *deployment_target = NULL;
+	const char *slash;
 
-	if ((triple = getenv("TARGET_TRIPLE")) != NULL)
-		return triple;
-	else {
-		triple = (char *)malloc(64);
+	if (sdk == NULL)
+		return NULL;
 
-		/*
-		 * No SDK means no triple, which is a variable this cannot
-		 * supply rather than a reason to refuse to try.
-		 */
-		if (sdk_path_or_null(current_sdk) == NULL)
-			return NULL;
+	slash = strrchr(sdk, '/');
 
-		if ((default_arch = strdup(get_sdk_info(sdk_path_or_null(current_sdk)).default_arch)) == NULL)
-			return NULL;
+	return (slash != NULL) ? slash + 1 : sdk;
+}
 
-		if ((deployment_target = strdup(get_sdk_info(sdk_path_or_null(current_sdk)).deployment_target)) == NULL)
-			return NULL;
+/**
+ * @func path_join -- a path under a directory, or NULL
+ * @arg dir - the directory
+ * @arg leaf - what to put under it
+ */
+static char *path_join(const char *dir, const char *leaf)
+{
+	char *path;
 
-		parse_target_triple(triple, deployment_target, default_arch);
+	if (dir == NULL || asprintf(&path, "%s/%s", dir, leaf) < 0)
+		return NULL;
 
-		return triple;
+	return path;
+}
+
+/**
+ * @func manpath_add -- add one entry to a MANPATH being built
+ * @arg manpath - the MANPATH so far, or NULL while it is still empty
+ * @arg path - the entry to add
+ *
+ * Every entry is written with its trailing colon, so the list ends in
+ * one -- which is what Apple writes, and what leaves the empty entry at
+ * the end to fall back on the system's own pages.
+ */
+static int manpath_add(char **manpath, const char *path)
+{
+	char *next;
+
+	if (asprintf(&next, "%s%s:", (*manpath != NULL) ? *manpath : "", path) < 0)
+		return -1;
+
+	free(*manpath);
+	*manpath = next;
+
+	return 0;
+}
+
+/**
+ * @func manpath_env -- the manual page path a tool is run with
+ * @arg devdir - the developer directory in effect
+ * @arg sdk - the SDK in effect, or NULL when none could be located
+ * @return: the MANPATH value, or NULL if it could not be built
+ *
+ * The SDK's own pages, then the platform's, then the developer
+ * directory's, then the default toolchain's.
+ *
+ * The SDK contributes nothing when it could not be located, but the
+ * platform still does: an SDK named and not found leaves the platform
+ * alone, and the host's is named in its place.  That is why a bad SDK
+ * against a full Xcode still reports MacOSX.platform's pages.
+ *
+ * The platform is named only where its bundle is really there, since a
+ * Command Line Tools directory has no platform bundle and Apple does not
+ * invent one.  The toolchain's pages are named whether or not they
+ * exist, also as Apple does: a toolchain not yet laid down is still
+ * where its pages will go.
+ */
+static char *manpath_env(const char *devdir, const char *sdk)
+{
+	struct stat st;
+	char toolchain[PATH_MAX], *manpath = NULL, *dir, *page;
+
+	if (sdk != NULL) {
+		if ((page = path_join(sdk, "usr/share/man")) == NULL ||
+		    manpath_add(&manpath, page) != 0) {
+			free(page);
+			goto fail;
+		}
+		free(page);
 	}
+
+	if ((dir = sdk_platform_dir(devdir, sdk)) == NULL &&
+	    (dir = path_join(devdir, "Platforms/MacOSX.platform")) == NULL)
+		goto fail;
+	if (stat(dir, &st) == 0 && S_ISDIR(st.st_mode)) {
+		if ((page = path_join(dir, "usr/share/man")) == NULL ||
+		    manpath_add(&manpath, page) != 0) {
+			free(page);
+			free(dir);
+			goto fail;
+		}
+		free(page);
+	}
+	free(dir);
+
+	if ((page = path_join(devdir, "usr/share/man")) == NULL ||
+	    manpath_add(&manpath, page) != 0) {
+		free(page);
+		goto fail;
+	}
+	free(page);
+
+	snprintf(toolchain, sizeof(toolchain),
+	    "%s/Toolchains/%s/usr/share/man", devdir, "XcodeDefault.xctoolchain");
+	if (manpath_add(&manpath, toolchain) != 0)
+		goto fail;
+
+	return manpath;
+
+fail:
+	free(manpath);
+	return NULL;
+}
+
+/**
+ * @func env_entry_is -- whether an environ entry is one of the named variables
+ * @arg entry - an entry of environ, "NAME=value" or "NAME"
+ * @arg names - NUL-terminated names to test for
+ */
+static int env_entry_is(const char *entry, const char *const *names)
+{
+	const char *eq = strchr(entry, '=');
+	size_t len = (eq != NULL) ? (size_t)(eq - entry) : strlen(entry);
+	size_t i;
+
+	for (i = 0; names[i] != NULL; i++)
+		if (strlen(names[i]) == len && strncmp(entry, names[i], len) == 0)
+			return 1;
+
+	return 0;
+}
+
+/**
+ * @func tool_env -- the whole environment a tool is run with
+ * @arg devdir - the developer directory in effect
+ * @arg sdk - the SDK in effect, or NULL when none could be located
+ * @arg sdk_named - whether an SDK was named on the command line
+ * @return: a NULL-terminated environment for execve, or NULL
+ *
+ * The caller's environment is the tool's environment, with a handful of
+ * entries replaced.  It used to be replaced wholesale by a list of five,
+ * which left every tool run by this with no TERM, no LANG, no TMPDIR and
+ * no DEVELOPER_DIR at all -- a program run through xcrun is not a
+ * program run with a scrubbed environment, and the parts of the
+ * environment xcrun has an opinion about are only the ones below.
+ *
+ * What xcrun does set:
+ *
+ * > SDKROOT is where programs such as clang need to find the SDK.  When
+ *   the SDK named cannot be located the name is passed through as given,
+ *   which is what Apple does: a tool that reads SDKROOT is told which
+ *   SDK was asked for, not handed nothing.
+ * > MANPATH is the manual page path, in the order manpath_env lists.
+ * > CPATH and LIBRARY_PATH are the host's own include and library
+ *   directories, and are set for the macOS SDK alone: they name where
+ *   the system headers and libraries are, and no other platform's SDK
+ *   means anything by them.
+ * > A deployment target, but only where one was asked for on the command
+ *   line.  The one in the environment is already inherited, and the
+ *   SDK's is a default Apple does not impose unasked.
+ *
+ * PATH is deliberately not touched.  Apple does not add the developer
+ * directory or the toolchain to it, and a tool that needs them is a
+ * tool that was not found by looking there.  Neither is LD_LIBRARY_PATH
+ * nor TARGET_TRIPLE, which this used to set and Apple does not.
+ */
+static char **tool_env(const char *devdir, const char *sdk, int sdk_named)
+{
+	/*
+	 * Two of these are always xcrun's: the SDK in effect is xcrun's
+	 * answer however it was arrived at, and MANPATH is xcrun's pages
+	 * with the caller's after them.
+	 */
+	static const char *const always[] = { "SDKROOT", "MANPATH", NULL };
+	const char *computed[6] = { NULL };
+	const char *deployment_target;
+	struct stat st;
+	const char *name, *inherited;
+	char **envp, *manpath, *value;
+	size_t kept = 0, total, n = 0, owned = 0;
+	int i, c, set_cpaths, set_toolchains, set_targets;
+
+	/*
+	 * The rest are xcrun's only where it has an answer of its own to
+	 * put there, and the caller's where it has not.  A value already in
+	 * the environment is a value the caller asked for, and it stands:
+	 * SDKROOT, TOOLCHAINS, a deployment target and the host's own
+	 * include and library paths all read the same way, and PATH -- which
+	 * is never touched for this reason -- is only the clearest case of
+	 * it.  Naming a toolchain replaces the caller's, and asking for a
+	 * deployment target hands the variable to xcrun even where the SDK
+	 * turns out to name none, which leaves the tool with no target
+	 * rather than with the caller's.
+	 */
+	set_cpaths = (sdk_named == 0 && sdk != NULL &&
+	    (name = sdk_dir_name(sdk)) != NULL &&
+	    strncmp(name, "MacOSX", sizeof("MacOSX") - 1) == 0);
+	set_toolchains = (requested_toolchain != NULL);
+	set_targets = (macosx_deployment_target_set == 1 || ios_deployment_target_set == 1);
+
+	deployment_target = NULL;
+	if (set_targets && sdk != NULL && stat(sdk, &st) == 0 && S_ISDIR(st.st_mode))
+		deployment_target = get_sdk_info(sdk).deployment_target;
+
+	/*
+	 * Packed in order and not left with holes: a name list is read up to
+	 * its NULL, so an empty slot in the middle would hide every name
+	 * after it and quietly leave the caller's value in place for the
+	 * very variables xcrun had taken over.
+	 */
+	c = 0;
+	if (set_cpaths) {
+		computed[c++] = "CPATH";
+		computed[c++] = "LIBRARY_PATH";
+	}
+	if (set_toolchains)
+		computed[c++] = "TOOLCHAINS";
+	if (macosx_deployment_target_set == 1)
+		computed[c++] = "MACOSX_DEPLOYMENT_TARGET";
+	else if (ios_deployment_target_set == 1)
+		computed[c++] = "IOS_DEPLOYMENT_TARGET";
+
+	for (i = 0; environ[i] != NULL; i++)
+		if (!env_entry_is(environ[i], always) && !env_entry_is(environ[i], computed))
+			kept++;
+
+	/* SDKROOT, MANPATH, CPATH, LIBRARY_PATH, TOOLCHAINS and a target */
+	total = kept + 7;
+	if ((envp = calloc(total + 1, sizeof(char *))) == NULL)
+		return NULL;
+
+	for (i = 0; environ[i] != NULL; i++)
+		if (!env_entry_is(environ[i], always) && !env_entry_is(environ[i], computed))
+			envp[n++] = environ[i];
+
+	/*
+	 * Everything before here belongs to environ and is only borrowed;
+	 * everything from here on is built here and is ours to free.  The
+	 * two are kept in one list because a tool is given one list, and
+	 * the split is remembered so that a failure part way through can
+	 * hand back only what this function made -- freeing a borrowed
+	 * environ entry would be freeing a string the process is still
+	 * using.
+	 */
+	owned = n;
+
+	if (asprintf(&value, "SDKROOT=%s", (sdk != NULL) ? sdk : current_sdk) < 0)
+		goto fail;
+	envp[n++] = value;
+
+	if ((manpath = manpath_env(devdir, sdk)) != NULL) {
+		/*
+		 * The caller's pages are kept, and go after ours rather than
+		 * instead of them, in the empty slot the list already ends
+		 * with -- the trailing colon Apple leaves is where the next
+		 * entry goes, and it is a separator for that entry and
+		 * nothing more.
+		 */
+		inherited = getenv("MANPATH");
+		if (inherited != NULL && *inherited != '\0') {
+			if (asprintf(&value, "MANPATH=%s%s", manpath, inherited) < 0) {
+				free(manpath);
+				goto fail;
+			}
+		} else if (asprintf(&value, "MANPATH=%s", manpath) < 0) {
+			free(manpath);
+			goto fail;
+		}
+		free(manpath);
+		envp[n++] = value;
+	} else if ((inherited = getenv("MANPATH")) != NULL && *inherited != '\0') {
+		if (asprintf(&value, "MANPATH=%s", inherited) < 0)
+			goto fail;
+		envp[n++] = value;
+	}
+
+	/*
+	 * These two name the host's own headers and libraries, and are set
+	 * for the SDK in effect when no SDK was named -- which is how Apple
+	 * has it.  Name one, and they are not set at all: asked for macOS
+	 * and handed the macOS SDK, Apple's env has no CPATH in it either.
+	 * A tool that needed them was reached by the default.
+	 */
+	if (set_cpaths) {
+		if (asprintf(&value, "CPATH=%s", "/usr/local/include") < 0)
+			goto fail;
+		envp[n++] = value;
+		if (asprintf(&value, "LIBRARY_PATH=%s", "/usr/local/lib") < 0)
+			goto fail;
+		envp[n++] = value;
+	}
+
+	if (requested_toolchain != NULL) {
+		if (asprintf(&value, "TOOLCHAINS=%s", requested_toolchain) < 0)
+			goto fail;
+		envp[n++] = value;
+	}
+
+	/*
+	 * Read only where it is wanted, and only from an SDK that is there:
+	 * asking a path that does not exist for its settings is an error
+	 * that ends the command, and a tool that needs no deployment target
+	 * should not have its run ended over one.  A name that resolved to
+	 * nothing is the same case and is left alone, the SDK having already
+	 * said it is not there.  Where none is read the variable stays out,
+	 * having been taken out of the environment above.
+	 */
+	if (deployment_target != NULL && macosx_deployment_target_set == 1) {
+		if (asprintf(&value, "MACOSX_DEPLOYMENT_TARGET=%s", deployment_target) < 0)
+			goto fail;
+		envp[n++] = value;
+	} else if (deployment_target != NULL && ios_deployment_target_set == 1) {
+		if (asprintf(&value, "IOS_DEPLOYMENT_TARGET=%s", deployment_target) < 0)
+			goto fail;
+		envp[n++] = value;
+	}
+
+	envp[n] = NULL;
+	return envp;
+
+fail:
+	for (i = (int)owned; i < (int)n; i++)
+		free(envp[i]);
+	free(envp);
+	return NULL;
 }
 
 /**
@@ -982,85 +1249,27 @@ static char *get_target_triple(const char *current_sdk)
  */
 static int call_command(const char *cmd, int argc, char *argv[])
 {
-	int i, n = 0;
-	char *envp[8];
-	char *sdk = NULL;
-	char *target_triple = NULL;
-	const char *deployment_target = NULL;
-	const char *path_env = NULL;
-	const char *home_env = NULL;
+	char **envp;
+	char *sdk;
+	int i;
 
 	/*
-	 * Pass SDKROOT, PATH, HOME, LD_LIBRARY_PATH, TARGET_TRIPLE, and MACOSX_DEPLOYMENT_TARGET to the called program's environment.
-	 *
-	 * > SDKROOT is used for when programs such as clang need to know the location of the sdk.
-	 * > PATH is used for when programs such as clang need to call on another program (such as the linker).
-	 * > HOME is used for recursive calls to xcrun (such as when xcrun calls a script calling xcrun ect).
-	 * > LD_LIBRARY_PATH is used for when tools needs to access libraries that are specific to the toolchain.
-	 * > TARGET_TRIPLE is used for clang/clang++ cross compilation when building on a foreign host.
-	 * > {MACOSX|IOS}_DEPLOYMENT_TARGET is used for tools like ld that need to set the minimum compatibility
-	 *   version number for a linked binary.
-	 *
-	 * Each entry is allocated to fit.  These strings concatenate whole
-	 * paths -- PATH in particular appends the caller's entire PATH to two
-	 * absolute directories -- and a fixed PATH_MAX buffer overflows on any
-	 * deeply nested developer directory, which _FORTIFY_SOURCE turns into
-	 * a SIGTRAP.  Entries that have no value are left out rather than
-	 * emitted uninitialised; envp must stay NUL-terminated, so nothing may
-	 * be skipped in the middle.
+	 * An SDK named by path is the SDK in effect, and it stays that one
+	 * however far from the installation it is: a path nowhere near this
+	 * Xcode is still the SDK a tool is run against, which is why it does
+	 * not fall back to the default on failing to be here.
 	 */
-	memset(envp, 0, sizeof(envp));
+	if (alternate_sdk_path != NULL)
+		sdk = strdup(alternate_sdk_path);
+	else
+		sdk = sdk_path_or_null(current_sdk);
 
-	path_env = getenv("PATH");
-	home_env = getenv("HOME");
-
-	/*
-	 * SDKROOT is only worth setting to something.  A tool run against an
-	 * SDK that is not there is given the rest of its environment
-	 * without it, rather than being handed an empty one.
-	 */
-	if ((sdk = sdk_path_or_null(current_sdk)) != NULL) {
-		if (asprintf(&envp[n], "SDKROOT=%s", sdk) != (-1))
-			n++;
+	envp = tool_env(developer_dir, sdk,
+	    (explicit_sdk_mode == 1 || alternate_sdk_path != NULL) ? 1 : 0);
+	if (envp == NULL) {
 		free(sdk);
+		return -1;
 	}
-	if (asprintf(&envp[n], "PATH=%s/usr/bin:%s/usr/bin:%s", developer_dir,
-		     get_toolchain_path(current_toolchain),
-		     (path_env != NULL) ? path_env : "") != (-1))
-		n++;
-	if (asprintf(&envp[n], "LD_LIBRARY_PATH=%s/usr/lib",
-		     get_toolchain_path(current_toolchain)) != (-1))
-		n++;
-	if (home_env != NULL && asprintf(&envp[n], "HOME=%s", home_env) != (-1))
-		n++;
-
-	if ((target_triple = get_target_triple(current_sdk)) != NULL) {
-		if (asprintf(&envp[n], "TARGET_TRIPLE=%s", target_triple) != (-1))
-			n++;
-	} else
-		verbose_printf(stdout, "xcrun: info: no target triple information for %s.sdk.\n", current_sdk);
-
-	if ((deployment_target = getenv("IOS_DEPLOYMENT_TARGET")) != NULL) {
-		if (asprintf(&envp[n], "IOS_DEPLOYMENT_TARGET=%s", deployment_target) != (-1))
-			n++;
-	} else if ((deployment_target = getenv("MACOSX_DEPLOYMENT_TARGET")) != NULL) {
-		if (asprintf(&envp[n], "MACOSX_DEPLOYMENT_TARGET=%s", deployment_target) != (-1))
-			n++;
-	} else {
-		/* Use the deployment target info that is provided by the SDK. */
-		deployment_target = get_sdk_info(sdk_path_or_null(current_sdk)).deployment_target;
-		if (deployment_target != NULL) {
-			if (macosx_deployment_target_set == 1) {
-				if (asprintf(&envp[n], "MACOSX_DEPLOYMENT_TARGET=%s", deployment_target) != (-1))
-					n++;
-			} else if (ios_deployment_target_set == 1) {
-				if (asprintf(&envp[n], "IOS_DEPLOYMENT_TARGET=%s", deployment_target) != (-1))
-					n++;
-			}
-		}
-	}
-
-	envp[n] = NULL;
 
 	if (logging_mode == 1) {
 		logging_printf(stdout, "xcrun: info: invoking command:\n\t\"%s", cmd);
@@ -1140,6 +1349,25 @@ static char *sdk_toolchain_name(const char *sdkpath)
 		name = current_toolchain;
 
 	return strdup((name != NULL) ? name : "");
+}
+
+/**
+ * @func sdk_from_environment -- the SDK the caller's environment names
+ * @arg value - the SDKROOT the caller set, or NULL if it set none
+ * @return: malloc'd name or path
+ *
+ * SDKROOT is the caller's own answer to the question and is taken as it
+ * was written.  A path in it is that path, which is the shape
+ * "SDKROOT=$(xcrun --show-sdk-path)" hands round to the next command; read
+ * as a name instead, it would take a directory's name for an SDK's name
+ * and then go looking for an SDK that is not called that.  A name in it is
+ * looked up as one.  Nothing is trimmed off either end: the answer is not
+ * ours to shorten, and the spelling of a path that is already resolved
+ * needs none.
+ */
+static char *sdk_from_environment(const char *value)
+{
+	return (value != NULL) ? strdup(value) : default_sdk_name();
 }
 
 static int request_command(const char *name, int argc, char *argv[]);
@@ -1283,11 +1511,8 @@ static int request_command(const char *name, int argc, char *argv[])
 	 * current_toolchain for PATH.
 	 */
 	if (current_sdk == NULL) {
-		current_sdk = (char *)malloc(XCRUN_NAME_MAX);
-		if ((sdk_env = getenv("SDKROOT")) != NULL)
-			name_from_path(current_sdk, XCRUN_NAME_MAX, sdk_env, sdk_exts);
-		else
-			current_sdk = default_sdk_name();
+		sdk_env = getenv("SDKROOT");
+		current_sdk = sdk_from_environment(sdk_env);
 	}
 
 	if (current_toolchain == NULL) {
@@ -1552,7 +1777,7 @@ static int xcrun_parse_args(int argc, char *argv[])
 							if (*optarg != '-') {
 								++argc_offset;
 								sdk = optarg;
-								/* we support absolute paths and short names */
+							/* we support absolute paths and short names */
 								if (*sdk == '/') {
 									/*
 									 * A path is taken as the SDK it is
@@ -1569,9 +1794,19 @@ static int xcrun_parse_args(int argc, char *argv[])
 										    sdk, strerror(errno));
 									alternate_sdk_path = sdk;
 								} else {
+									/*
+									 * The name is kept as it was written, and
+									 * the extension is not taken off it:
+									 * "macosx26.5.sdk" is a directory's
+									 * spelling of itself and is no more an
+									 * SDK's name than "MacOSX26.5" is, so
+									 * stripping it would answer a question
+									 * nobody asked and hand back an SDK
+									 * that Apple says cannot be located.
+									 */
 									current_sdk = (char *)malloc(XCRUN_NAME_MAX);
 									explicit_sdk_mode = 1;
-									stripext(current_sdk, XCRUN_NAME_MAX, sdk, sdk_exts);
+									snprintf(current_sdk, XCRUN_NAME_MAX, "%s", sdk);
 								}
 							} else {
 								fprintf(stderr, "xcrun: error: sdk flag requires an argument.\n");
@@ -1582,6 +1817,7 @@ static int xcrun_parse_args(int argc, char *argv[])
 							if (*optarg != '-') {
 								++argc_offset;
 								toolchain = optarg;
+								requested_toolchain = toolchain;
 							/* we support absolute paths and short names */
 							if (*toolchain == '/') {
 								/* Said once, then used anyway, as for --sdk. */
@@ -1637,8 +1873,20 @@ static int xcrun_parse_args(int argc, char *argv[])
 
 			++argc_offset;
 
-			/* We don't want to parse any more arguments after these are set. */
-			if (ch == 'f' || ch == 'r')
+			/*
+			 * A run hands everything after its tool to the tool,
+			 * so the line is finished there and this stops reading
+			 * it.
+			 *
+			 * A find does not.  It never runs the tool at all, so
+			 * nothing after the tool belongs to it, and the rest of
+			 * the line is xcrun's to read: "--find clang --sdk
+			 * macosx" is one command with an option on each side
+			 * of the tool name, and both are read.  Apple counts
+			 * an SDK named after the tool in a find and says so if
+			 * it names nothing, and does not for a run.
+			 */
+			if (ch == 'r')
 				break;
 		}
 	} else { /* We are just executing a program. */
@@ -1669,11 +1917,8 @@ static int xcrun_parse_args(int argc, char *argv[])
 
 	/* If our SDK and/or Toolchain hasn't been specified, fall back to environment or defaults. */
 	if (current_sdk == NULL) {
-		current_sdk = (char *)malloc(XCRUN_NAME_MAX);
-		if ((sdk_env = getenv("SDKROOT")) != NULL)
-			name_from_path(current_sdk, XCRUN_NAME_MAX, sdk_env, sdk_exts);
-		else
-			current_sdk = default_sdk_name();
+		sdk_env = getenv("SDKROOT");
+		current_sdk = sdk_from_environment(sdk_env);
 	}
 
 	if (current_toolchain == NULL) {
@@ -1805,6 +2050,17 @@ static int xcrun_parse_args(int argc, char *argv[])
 		 * name the caller already spelled out has nowhere else to go.
 		 */
 		if ((path = named_path(tool_called)) != NULL) {
+			/*
+			 * The SDK is resolved before the path is printed, all
+			 * the same.  It is asked for once per command, and an
+			 * --sdk that names nothing has said so by now whether
+			 * or not the tool turns out to be a path: the SDK was
+			 * asked for, and what became of the answer belongs to
+			 * the SDK, not to how the tool happened to be spelled.
+			 * A tool run needs none of this, which is why only
+			 * this one asks.
+			 */
+			free(sdk_path_or_null(current_sdk));
 			fprintf(stdout, "%s\n", path);
 			free(path);
 			retval = 0;
@@ -1835,13 +2091,13 @@ static int xcrun_parse_args(int argc, char *argv[])
 			 * EX_OSERR rather than the EX_OSFILE above, which is
 			 * for a name no search could place.
 			 */
-			call_command(path, argc - argc_offset, argv);
+			call_command(path, argc - argc_offset, argv + argc_offset);
 			/* NOREACH */
 			fprintf(stderr, "xcrun: error: can't exec \'%s\' (errno=%s)\n",
 			    path, strerror(errno));
 			exit(EX_OSERR);
 		}
-		else if (request_command(tool_called, (argc - argc_offset),  (argv += ((argc - argc_offset) - (argc - argc_offset) + (argc_offset)))) != -1)
+		else if (request_command(tool_called, argc - argc_offset, argv + argc_offset) != -1)
 			retval = -1; /* NOREACH */
 		/*
 		 * Not in any of the directories searched above, but the
@@ -1849,7 +2105,7 @@ static int xcrun_parse_args(int argc, char *argv[])
 		 * runs it from wherever that answer points.
 		 */
 		else if ((path = xcodebuild_find_path(tool_called)) != NULL) {
-			call_command(path, argc - argc_offset, argv);
+			call_command(path, argc - argc_offset, argv + argc_offset);
 			/* NOREACH */
 			fprintf(stderr, "xcrun: error: can't exec \'%s\' (errno=%s)\n", path, strerror(errno));
 			exit(1);
