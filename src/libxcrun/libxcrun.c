@@ -146,6 +146,24 @@ static int explicit_toolchain_mode = 0;
 static int ios_deployment_target_set = 0;
 static int macosx_deployment_target_set = 0;
 
+/*
+ * Whether the run went around the cache file rather than through it.  The
+ * trace names the file, and the names are only true of a run that used it,
+ * so the trace needs to know; the flag is not a mode of its own and is
+ * kept beside the others rather than in the parser with its own kind of
+ * local because the notes are printed from everywhere.
+ */
+static int cache_bypass_f = 0;
+
+/*
+ * Whether the run emptied the cache file first.  That is not the same as
+ * bypassing it, so it is kept apart: a -k run still goes through the cache
+ * afterwards, which is why it still names the key, but it has just made
+ * sure there is nothing in the file to answer from, which is why it has no
+ * answer to report.
+ */
+static int cache_cleared_f = 0;
+
 /* Runtime info */
 static char *developer_dir = NULL;
 static char *current_sdk = NULL;
@@ -268,23 +286,6 @@ static int test_sdk_authenticity(const char *path)
 	free(fname);
 
 	return retval;
-}
-
-/**
- * @func verbose_printf -- Print output to fp in verbose mode.
- * @arg fp - pointer to file (file, stderr, or stdio)
- * @arg str - string to print
- * @arg ... - additional arguments used
- */
-static void verbose_printf(FILE *fp, const char *str, ...)
-{
-	va_list args;
-
-	if (verbose_mode == 1) {
-		va_start(args, str);
-		vfprintf(fp, str, args);
-		va_end(args);
-	}
 }
 
 /**
@@ -636,7 +637,6 @@ static char *default_sdk_name(void)
 	 * here, keeps the answer.
 	 */
 	if ((name = xt_default_sdk_path(developer_dir)) != NULL) {
-		verbose_printf(stdout, "xcrun: info: no configured sdk; using \'%s\'.\n", name);
 		return name;
 	}
 
@@ -728,7 +728,6 @@ static const char *default_cfg_path(void)
 	if ((devpath = developer_dir) != NULL) {
 		snprintf(path, sizeof(path), "%s/usr/share/xcrun.ini", devpath);
 		if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
-			verbose_printf(stdout, "xcrun: info: using configuration \'%s\'.\n", path);
 			return path;
 		}
 	}
@@ -748,6 +747,9 @@ static const char *default_cfg_path(void)
  * it could not look up, and so is the one that stops.  Callers that need
  * the SDK cannot have it report why on their behalf, so they say it.
  */
+/* The trace of a run that resolves an SDK is printed from below manpath_env. */
+static void verbose_manpath_note(const char *sdkfield, const char *sdkpath);
+
 static char *get_sdk_path(const char *name)
 {
 	char *path = NULL;
@@ -804,6 +806,15 @@ static char *get_sdk_path(const char *name)
 static char *require_sdk_path(const char *name, const char *item)
 {
 	char *path = get_sdk_path(name);
+
+	/*
+	 * The SDK has been located, or has said that it is not there, and
+	 * either way the manual page lookup that every --show-* shares has
+	 * now been made -- the trace puts it here, between the report of the
+	 * SDK and the report of the item, which is where the shipped library
+	 * has it.
+	 */
+	verbose_manpath_note(path != NULL ? path : name, path);
 
 	if (path != NULL)
 		return path;
@@ -1025,6 +1036,168 @@ static char *manpath_env(const char *devdir, const char *sdk)
 fail:
 	free(manpath);
 	return NULL;
+}
+
+/*
+ * What -v adds is notes on stderr about the work the run would otherwise do
+ * in silence, and they are notes rather than warnings: nothing is diagnosed
+ * and no exit status changes with them on.  The two that describe the cache
+ * also say where that cache is, which is a per-user temporary file rather
+ * than anything under the developer directory, and which is not where
+ * TMPDIR points -- that variable is set per process for the child, and the
+ * shipped library takes the per-user answer the C library gives instead.
+ */
+
+/**
+ * @func cache_db_path -- the path of the cache file, if it can be had
+ * @arg buf - where to write the path
+ * @arg len - the size of buf
+ * @return: buf, or NULL when the answer is not available
+ */
+static char *cache_db_path(char *buf, size_t len)
+{
+	size_t n = confstr(_CS_DARWIN_USER_TEMP_DIR, buf, len);
+
+	if (n == 0 || n > len)
+		return NULL;
+
+	/* The answer names a directory and ends in its separator already. */
+	if (snprintf(buf + strlen(buf), len - strlen(buf), "%s", "xcrun_db") >= (int)(len - strlen(buf)))
+		return NULL;
+
+	return buf;
+}
+
+/**
+ * @func verbose_note -- one note of the -v trace
+ * @arg fmt - what the note says
+ *
+ * Every note is the same one word of the trace, so that a run can be read
+ * by picking the lines out of whatever else shares the terminal.
+ */
+static void verbose_note(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (verbose_mode != 1)
+		return;
+
+	fprintf(stderr, "xcrun: note: ");
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fputc('\n', stderr);
+}
+
+/* The manual page lookup is made once per run and named once per run. */
+static int verbose_manpath_reported = 0;
+
+/**
+ * @func verbose_manpath_note -- name the manual page lookup that was made
+ * @arg sdkfield - the SDK as it is named in the key: a path, or the name
+ *     as the user wrote it when no SDK could be located
+ * @arg sdkpath - the SDK that resolved, or NULL when none did
+ *
+ * The key is what the answer is filed under, and it is the same shape for
+ * every action that needs a manual page path: the SDK, the developer
+ * directory, and the path itself.  A --no-cache run is not in the file at
+ * all, so it names nothing.
+ */
+static void verbose_manpath_note(const char *sdkfield, const char *sdkpath)
+{
+	char db[PATH_MAX];
+	char *manpath;
+
+	if (verbose_manpath_reported)
+		return;
+	verbose_manpath_reported = 1;
+
+	if (cache_bypass_f == 1)
+		return;
+
+	verbose_note("database key is: %s|%s|<manpath>", sdkfield, developer_dir);
+
+	/*
+	 * An answer is reported only when there was one to report.  A -k run
+	 * has just made sure the file is empty, and a -n run never looks at
+	 * it -- both name the key, and neither says that it resolved.
+	 */
+	if (cache_cleared_f == 1)
+		return;
+
+	manpath = manpath_env(developer_dir, (char *)sdkpath);
+	if (manpath == NULL)
+		return;
+
+	if (cache_db_path(db, sizeof(db)) != NULL)
+		verbose_note("lookup resolved in '%s' : '%s'", db, manpath);
+
+	free(manpath);
+}
+
+/**
+ * @func verbose_toolchain_text -- the TOOLCHAINS a run would use, as text
+ * @return: the text, or "" when no toolchain was asked for
+ *
+ * TOOLCHAINS is the text as it was given, whether that came from --toolchain
+ * or from the environment, and a run with neither has none -- even though
+ * the toolchain that is searched is the default one.  The name of what is
+ * searched and the name of what is exported are not the same thing.
+ */
+static const char *verbose_toolchain_text(void)
+{
+	const char *text = requested_toolchain;
+
+	if (text == NULL)
+		text = getenv("TOOLCHAINS");
+
+	return text != NULL ? text : "";
+}
+
+/**
+ * @func verbose_env_note -- name the environment a tool would be given
+ * @arg sdkroot - the SDKROOT the tool would see
+ * @arg toolchains - the TOOLCHAINS the tool would see
+ *
+ * The six entries are the ones xcrun has an opinion about, and they are
+ * named in a fixed order because the point of the trace is to be read: PATH
+ * first because it decides what runs, and the cache last because it is the
+ * only one of the six that is not in the environment being described.
+ */
+static void verbose_env_note(const char *sdkroot, const char *toolchains)
+{
+	char db[PATH_MAX];
+	const char *val;
+
+	val = getenv("PATH");
+	verbose_note("PATH = '%s'", val != NULL ? val : "");
+	verbose_note("SDKROOT = '%s'", sdkroot != NULL ? sdkroot : "");
+	verbose_note("TOOLCHAINS = '%s'", toolchains);
+	verbose_note("DEVELOPER_DIR = '%s'", developer_dir != NULL ? developer_dir : "");
+
+	val = getenv("XCODE_DEVELOPER_USR_PATH");
+	verbose_note("XCODE_DEVELOPER_USR_PATH = '%s'", val != NULL ? val : "");
+
+	if (cache_db_path(db, sizeof(db)) != NULL)
+		verbose_note("xcrun_db = '%s'", db);
+}
+
+/**
+ * @func verbose_tool_key_note -- name the utility lookup that was made
+ * @arg name - the utility as the user named it
+ * @arg sdkroot - the SDKROOT the lookup was made under
+ * @arg toolchains - the TOOLCHAINS the lookup was made under
+ *
+ * A utility named by path is not looked up at all -- it is the path -- and
+ * so has no key.  The trailing separator is the empty last field, and it is
+ * not optional: it is the one character that tells a key ending in the
+ * developer directory from one that does not.
+ */
+static void verbose_tool_key_note(const char *name, const char *sdkroot, const char *toolchains)
+{
+	verbose_note("database key is: %s|%s|%s|%s|", name,
+	    sdkroot != NULL ? sdkroot : "", toolchains != NULL ? toolchains : "",
+	    developer_dir != NULL ? developer_dir : "");
 }
 
 /**
@@ -1300,16 +1473,12 @@ static char *search_command(const char *name, char *dirs)
 	/* Search each path entry in dirs until we find our program. */
 	absl_path = strtok(dirs, delimiter);
 	while (absl_path != NULL) {
-		verbose_printf(stdout, "xcrun: info: checking directory \'%s\' for command \'%s\'...\n", absl_path, name);
-
 		/* Construct our program's absolute path. */
 		snprintf(cmd, PATH_MAX - 1, "%s/%s", absl_path, name);
 
 		/* Does it exist? Is it an executable? */
-		if (access(cmd, (F_OK | X_OK)) != (-1)) {
-			verbose_printf(stdout, "xcrun: info: found command's absolute path: \'%s\'\n", cmd);
+		if (access(cmd, (F_OK | X_OK)) != (-1))
 			return cmd;
-		}
 
 		/* If not, move onto the next entry.. */
 		absl_path = strtok(NULL, delimiter);
@@ -1614,7 +1783,28 @@ static int request_command(const char *name, int argc, char *argv[])
 	}
 
 	/* Search each path entry in search_string until we find our program. */
+	{
+		char *sdk = sdk_path_or_null(current_sdk);
+		const char *sdkfield = sdk != NULL ? sdk : current_sdk;
+
+		verbose_tool_key_note(name, sdkfield, verbose_toolchain_text());
+		free(sdk);
+	}
 	if ((cmd = search_command(name, search_string)) != NULL) {
+		/*
+		 * The lookup found the tool, and a working copy of the
+		 * cache says so.  A -k run has just emptied the file and a
+		 * -n run never looks at it, so neither reports an answer;
+		 * a -k run in particular would be naming what it itself
+		 * erased, which is not an answer at all.
+		 */
+		if (cache_bypass_f != 1 && cache_cleared_f != 1) {
+			char db[PATH_MAX];
+
+			if (cache_db_path(db, sizeof(db)) != NULL)
+				verbose_note("lookup resolved in '%s' : '%s'",
+				    db, cmd);
+		}
 		if (finding_mode == 1) {
 			fprintf(stdout, "%s\n", cmd);
 			free(cmd);
@@ -1739,6 +1929,7 @@ static int xcrun_parse_args(int argc, char *argv[])
 					break;
 				case 'v':
 					verbose_f = 1;
+					verbose_mode = 1;
 					break;
 				case 'l':
 					log_f = 1;
@@ -1765,9 +1956,18 @@ static int xcrun_parse_args(int argc, char *argv[])
 					break;
 				case 'n':
 					nocache_f = 1;
+					cache_bypass_f = 1;
 					break;
 				case 'k':
+					/*
+					 * Clearing the file is not the same as not
+					 * using it: a -k run still goes through the
+					 * cache afterwards and still names it.  Only
+					 * -n takes it out of the run, so only -n
+					 * takes the notes that describe it away.
+					 */
 					killcache_f = 1;
+					cache_cleared_f = 1;
 					break;
 				case 0: /* long-only options */
 					switch (optindex) {
@@ -1904,9 +2104,13 @@ static int xcrun_parse_args(int argc, char *argv[])
 	 * An option that means "do something to this tool" is incomplete
 	 * without the tool, and is answered before any SDK is worked out.
 	 * -k is the exception: it only ever clears the cache, so it is
-	 * complete on its own.
+	 * complete on its own.  A --show-* is not about a tool either, and
+	 * it is the one thing that is still printed when it arrived with
+	 * -v, -l or -n instead of with a tool -- the trace of the lookup is
+	 * what the combination asks for.
 	 */
-	if (tool_called == NULL &&
+	if (tool_called == NULL && show_kind == SHOW_NONE &&
+	    show_toolchain_f == 0 &&
 	    (verbose_f == 1 || log_f == 1 || nocache_f == 1 ||
 	     find_f == 1 || run_f == 1))
 		no_utility_named();
@@ -2010,7 +2214,34 @@ static int xcrun_parse_args(int argc, char *argv[])
 
 		case SHOW_NONE:
 			if (show_toolchain_f == 1) {
-				printf("%s\n", get_toolchain_path(current_toolchain));
+				/*
+				 * The toolchain path is found the same way a
+				 * manual page path is: under the SDK and the
+				 * developer directory.  The toolchain resolves
+				 * against the same key, so the trace names the
+				 * same two things it names for the manual page
+				 * path, with the toolchain where the manpath was.
+				 * A run that never looks at the cache has nothing
+				 * to key on either, and says nothing.
+				 */
+				char *sdk = sdk_path_or_null(current_sdk);
+				const char *sdkfield = sdk != NULL ? sdk : current_sdk;
+				char db[PATH_MAX];
+				const char *tc;
+
+				verbose_manpath_note(sdkfield, sdk);
+				if (cache_bypass_f != 1) {
+					verbose_note("database key is: %s|%s|<toolchain_dir>",
+					    sdkfield, developer_dir);
+					tc = get_toolchain_path(current_toolchain);
+					if (cache_cleared_f != 1 &&
+					    cache_db_path(db, sizeof(db)) != NULL)
+						verbose_note("lookup resolved in '%s' : '%s'",
+						    db, tc);
+				} else
+					tc = get_toolchain_path(current_toolchain);
+				printf("%s\n", tc);
+				free(sdk);
 				exit(0);
 			}
 			break;
@@ -2023,9 +2254,8 @@ static int xcrun_parse_args(int argc, char *argv[])
 	 * about a flag the help advertises helps nobody.
 	 */
 
-	/* Turn on verbose mode? */
-	if (verbose_f == 1)
-		verbose_mode = 1;
+	/* Turn on verbose mode?  Already done in the parser: a --show-* has
+	 * to be able to trace the SDK lookup it does before this point. */
 
 	/* Turn on logging mode? */
 	if (log_f == 1)
@@ -2037,6 +2267,23 @@ static int xcrun_parse_args(int argc, char *argv[])
 		if (killcache_f == 1)
 			exit(0);
 		no_utility_named();
+	}
+
+	/*
+	 * A utility is about to be searched for or run, which is where the
+	 * rest of the trace comes from: the manual page lookup every run
+	 * makes, the environment the utility would be given, and the utility
+	 * itself.  It is all said here, before the search, so that a run
+	 * that finds nothing has said the same thing as one that does.
+	 */
+	{
+		char *sdk = sdk_path_or_null(current_sdk);
+		const char *sdkfield = sdk != NULL ? sdk : current_sdk;
+
+		verbose_manpath_note(sdkfield, sdk);
+		verbose_env_note(sdkfield, verbose_toolchain_text());
+		verbose_note("xcrun via %s (xcrun)", tool_called);
+		free(sdk);
 	}
 
 	/* Search for program? */
