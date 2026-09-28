@@ -193,6 +193,80 @@ canonical_probe(const char *platform, const char *sdkpath, void *ctx)
 	free(canonical);
 }
 
+/*
+ * Whether a name carries a version, as in macosx26.5 or iphoneos18.0.
+ */
+static int
+name_has_version(const char *name)
+{
+	const char *p;
+
+	for (p = name; *p != '\0'; p++) {
+		if (*p >= '0' && *p <= '9')
+			return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * The SDK that an unversioned macOS name stands for.
+ *
+ * That is the installation's default, reported the way a versioned name
+ * would be: an installation that keeps MacOSX.sdk as a directory of its
+ * own alongside MacOSX26.5.sdk reports the versioned one, because that is
+ * what "macosx26.5" resolves to; one where MacOSX.sdk is only a link to
+ * MacOSX26.5.sdk reports the link, since that is the name the default
+ * itself goes by and there is nothing to disambiguate.
+ *
+ * Only macOS is answered this way.  Every other family is looked up by the
+ * names its SDKs give themselves, and the default SDK -- which is a macOS
+ * one in every installation that has a default -- is no answer at all to
+ * "iphoneos".
+ */
+static char *
+default_macosx_for_unversioned_name(const char *devdir)
+{
+	char dirpath[PATH_MAX], sibling[PATH_MAX];
+	char *def, *canonical, *version;
+	struct stat st;
+
+	if ((def = xt_default_sdk_path(devdir)) == NULL)
+		return NULL;
+
+	/* The canonical name is macosx26.5, and the bundle MacOSX26.5.sdk. */
+	if ((canonical = xt_sdk_setting(def, "CanonicalName")) == NULL)
+		return def;
+	if (strncasecmp(canonical, "macosx", 6) != 0) {
+		free(canonical);
+		return def;
+	}
+	version = strdup(canonical + 6);
+	free(canonical);
+	if (version == NULL || *version == '\0') {
+		free(version);
+		return def;
+	}
+
+	snprintf(dirpath, sizeof(dirpath), "%s", def);
+	*strrchr(dirpath, '/') = '\0';
+	snprintf(sibling, sizeof(sibling), "%s/MacOSX%s.sdk", dirpath, version);
+	free(version);
+
+	/* A default that is itself a link is the name to report. */
+	if (lstat(def, &st) == 0 && S_ISLNK(st.st_mode))
+		return def;
+
+	if (is_dir(sibling)) {
+		char *result = strdup(sibling);
+
+		free(def);
+		return result;
+	}
+
+	return def;
+}
+
 char *
 xt_find_sdk(const char *devdir, const char *name)
 {
@@ -201,6 +275,19 @@ xt_find_sdk(const char *devdir, const char *name)
 
 	if (devdir == NULL || name == NULL)
 		return NULL;
+
+	/*
+	 * A name with no version in it is not what any one SDK calls
+	 * itself, so it means the installation's default rather than a
+	 * lookup.  Answering it from the canonical names instead lands on
+	 * whichever bundle happens to sort first, which is how asking CLT
+	 * for "macosx" came back with its 15.4 SDK while the default is
+	 * the 26.5 one it points at.
+	 */
+	if (!name_has_version(name) && strcasecmp(name, "macosx") == 0) {
+		if ((path = default_macosx_for_unversioned_name(devdir)) != NULL)
+			return path;
+	}
 
 	/*
 	 * An SDK is named by what it says it is, so ask the SDKs that way
@@ -307,10 +394,233 @@ xt_find_toolchain(const char *devdir, const char *name)
 }
 
 /*
- * Used to pick a default when nothing has been selected.
+ * The version key an SDK has to answer to to be the default one.
  *
- * The host platform comes first: a Developer directory holds SDKs for
- * every platform Xcode supports, and taking whichever the filesystem
+ * Read from SystemVersion.plist at the base of the platform, which is
+ * where the shipped xcrun looks and where the string it builds -- macOS
+ * 26.5 gives "macosx26.5" -- comes from.  Only the major and minor parts
+ * are used; a patch release does not get an SDK of its own.  The CLT
+ * layout has the same file at the top of the developer directory, so that
+ * is tried next, and with no version to go on at all the caller is left
+ * with the ordering alone.
+ */
+static char *
+default_sdk_key(const char *devdir)
+{
+	char path[PATH_MAX];
+	CFDictionaryRef root;
+	char *version, *key = NULL, *dot;
+
+	snprintf(path, sizeof(path),
+	    "%s/Platforms/MacOSX.platform/Developer/System/Library/CoreServices/SystemVersion.plist",
+	    devdir);
+	if ((root = cfplist_read(path)) == NULL) {
+		snprintf(path, sizeof(path),
+		    "%s/System/Library/CoreServices/SystemVersion.plist", devdir);
+		root = cfplist_read(path);
+	}
+	if (root == NULL)
+		return NULL;
+
+	if ((version = cfplist_string(root, "ProductVersion")) != NULL) {
+		/* Keep "26" out of "26.5.2". */
+		if ((dot = strchr(version, '.')) != NULL) {
+			char *minor = strchr(dot + 1, '.');
+
+			if (minor != NULL)
+				*minor = '\0';
+		}
+		if (*version != '\0')
+			if (asprintf(&key, "macosx%s", version) == -1)
+				key = NULL;
+		free(version);
+	}
+	CFRelease(root);
+
+	return key;
+}
+
+struct default_sdk_search {
+	const char *key;
+	char *found;
+};
+
+static void
+default_sdk_probe(const char *platform, const char *sdkpath, void *ctx)
+{
+	struct default_sdk_search *search = ctx;
+	char *canonical;
+	int is_base = 0;
+	CFDictionaryRef dict;
+	char path[PATH_MAX];
+
+	(void)platform;
+
+	if (search->found != NULL)
+		return;
+
+	/*
+	 * Only a base SDK can be the default.  A beta or an internal build
+	 * answers the same canonical name as the release it sits beside, so
+	 * without this the first one the directory happened to list would
+	 * win over the one xcrun reports.
+	 */
+	snprintf(path, sizeof(path), "%s/SDKSettings.plist", sdkpath);
+	if ((dict = cfplist_read(path)) == NULL)
+		return;
+	if ((canonical = cfplist_string(dict, "IsBaseSDK")) != NULL) {
+		is_base = (strcmp(canonical, "YES") == 0 || strcmp(canonical, "1") == 0);
+		free(canonical);
+	}
+	CFRelease(dict);
+	if (!is_base)
+		return;
+
+	if (search->key == NULL) {
+		/* No version to match on: any base SDK will do. */
+		search->found = strdup(sdkpath);
+		return;
+	}
+
+	if ((canonical = xt_sdk_setting(sdkpath, "CanonicalName")) == NULL)
+		return;
+	if (strcmp(canonical, search->key) == 0)
+		search->found = strdup(sdkpath);
+	free(canonical);
+}
+
+static int
+name_order(const void *a, const void *b)
+{
+	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/*
+ * The best base SDK in one SDKs directory, by name order.
+ *
+ * The entries are sorted rather than taken as readdir hands them over, and
+ * that ordering is the whole answer: with several directories claiming one
+ * canonical name, MacOSX.sdk comes before MacOSX26.5.sdk because '.' sorts
+ * before '2', and that is the one the shipped xcrun reports.  readdir order
+ * is arbitrary, so relying on it picks whichever the filesystem felt like
+ * listing first.
+ */
+static char *
+default_sdk_in(const char *sdkdir, const char *key)
+{
+	DIR *d;
+	struct dirent *e;
+	char **names = NULL, *result = NULL, sdkpath[PATH_MAX];
+	size_t n = 0, i;
+
+	if ((d = opendir(sdkdir)) == NULL)
+		return NULL;
+
+	while ((e = readdir(d)) != NULL) {
+		size_t len = strlen(e->d_name);
+		char **grown;
+
+		if (len < 5 || strcmp(e->d_name + len - 4, ".sdk") != 0)
+			continue;
+		if ((grown = realloc(names, sizeof(char *) * (n + 1))) == NULL)
+			break;
+		names = grown;
+		if ((names[n] = strdup(e->d_name)) == NULL)
+			break;
+		n++;
+	}
+	closedir(d);
+
+	if (names != NULL)
+		qsort(names, n, sizeof(char *), name_order);
+
+	for (i = 0; i < n && result == NULL; i++) {
+		struct default_sdk_search search;
+
+		snprintf(sdkpath, sizeof(sdkpath), "%s/%s", sdkdir, names[i]);
+		search.key = key;
+		search.found = NULL;
+		default_sdk_probe(NULL, sdkpath, &search);
+		result = search.found;
+	}
+
+	for (i = 0; i < n; i++)
+		free(names[i]);
+	free(names);
+
+	/*
+	 * The name is left as the directory spells it, symlink and all.  A
+	 * Command Line Tools has MacOSX.sdk -> MacOSX26.5.sdk and reports
+	 * MacOSX.sdk, while an Xcode has the link pointing the other way and
+	 * reports the plain directory; resolving either one gives a path
+	 * xcrun never printed.
+	 */
+	return result;
+}
+
+/*
+ * The SDK a bare xcrun means when nothing was asked for.
+ *
+ * This is a different question from xt_find_sdk, which answers "where is
+ * the SDK called this".  Several directories can answer to one canonical
+ * name -- a stock Xcode carries MacOSX.sdk, MacOSX26.5.sdk and MacOSX26.sdk
+ * all saying macosx26.5 -- and the one reported is MacOSX.sdk, not the
+ * versioned bundle xt_find_sdk hands back when asked for "MacOSX".
+ *
+ * @return: path to the default SDK, or NULL when the directory holds none
+ */
+char *
+xt_default_sdk_path(const char *devdir)
+{
+	DIR *d;
+	struct dirent *e;
+	char dirpath[PATH_MAX], sdkdir[PATH_MAX];
+	char *key, *result = NULL, *other = NULL;
+
+	if (devdir == NULL)
+		return NULL;
+
+	key = default_sdk_key(devdir);
+
+	/* The macOS platform is the one that answers; the rest are a fallback. */
+	snprintf(sdkdir, sizeof(sdkdir),
+	    "%s/Platforms/MacOSX.platform/Developer/SDKs", devdir);
+	if ((result = default_sdk_in(sdkdir, key)) != NULL) {
+		free(key);
+		return result;
+	}
+
+	/* Another platform's SDK, if the host has no macOS one. */
+	snprintf(dirpath, sizeof(dirpath), "%s/Platforms", devdir);
+	if ((d = opendir(dirpath)) != NULL) {
+		while (other == NULL && (e = readdir(d)) != NULL) {
+			size_t len = strlen(e->d_name);
+
+			if (len < 10 || strcmp(e->d_name + len - 9, ".platform") != 0)
+				continue;
+			snprintf(sdkdir, sizeof(sdkdir), "%s/%s/Developer/SDKs",
+			    dirpath, e->d_name);
+			other = default_sdk_in(sdkdir, key);
+		}
+		closedir(d);
+	}
+	if (other != NULL) {
+		free(key);
+		return other;
+	}
+
+	/* The flat layout the Command Line Tools uses. */
+	snprintf(sdkdir, sizeof(sdkdir), "%s/SDKs", devdir);
+	result = default_sdk_in(sdkdir, key);
+	free(key);
+
+	return result;
+}
+
+/*
+ * The name of the default SDK, for callers that hold a name rather than a
+ * path.  The host platform comes first: a Developer directory holds SDKs
+ * for every platform Xcode supports, and taking whichever the filesystem
  * happens to return picks something arbitrary -- AppleTVOS, as it turns
  * out, where Apple's xcrun would say macosx.  Only if there is no macOS
  * SDK does anything else get considered.

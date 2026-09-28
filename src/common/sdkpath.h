@@ -74,6 +74,21 @@ char *xt_find_toolchain(const char *devdir, const char *name);
 char *xt_first_sdk_name(const char *devdir);
 
 /**
+ * @func xt_default_sdk_path -- the SDK a bare xcrun means
+ * @arg devdir - the Developer directory to search
+ * @return: malloc'd path, or NULL if the directory holds no base SDK
+ *
+ * Not the same as xt_find_sdk(devdir, "MacOSX").  Several directories can
+ * answer to one canonical name -- a stock Xcode ships MacOSX.sdk,
+ * MacOSX26.5.sdk and MacOSX26.sdk all saying macosx26.5 -- and the one
+ * reported as the default is MacOSX.sdk, which a name lookup resolves away
+ * to a versioned bundle.  Among the SDKs claiming the running system's
+ * version, the first by name is the answer; '.' sorts before a digit, so
+ * the unversioned bundle comes first.
+ */
+char *xt_default_sdk_path(const char *devdir);
+
+/**
  * @func xt_any_sdk_name -- name of any SDK present, in directory order
  * @arg devdir - the Developer directory to search
  * @return: malloc'd name without the .sdk suffix, or NULL if none
