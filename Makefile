@@ -76,14 +76,12 @@ LIBXCRUN_OBJS := $(OBJDIR)/libxcrun.o $(OBJDIR)/ini.o $(OBJDIR)/sdkpath.o \
 		 $(OBJDIR)/cfplist.o $(OBJDIR)/json.o
 LIBXCRUN_INSTALL_NAME := @rpath/libxcrun.dylib
 
-# xcrun carries the vendored common/ SDK-settings reader with it; every one of
-# these objects is reached, none is dead weight.  devpath.c is the one common/
-# file xcrun does not need: it includes devpath.h but never calls into it.
-# cfplist.c is the CoreFoundation property list reader sdkpath.c asks for the
-# plists in, so xcrun names CoreFoundation at link time.
+# xcrun is the shim: it hands the work to the active developer directory's
+# libxcrun through libxcselect and carries nothing else, which is why it links
+# neither libxcselect's vendored common/ reader nor CoreFoundation.  The
+# backend objects belong to libxcrun above, which is where the code now lives.
 XCRUN      := $(BUILD_DIR)/xcrun
-XCRUN_OBJS := $(OBJDIR)/xcrun.o $(OBJDIR)/ini.o $(OBJDIR)/sdkpath.o \
-	      $(OBJDIR)/cfplist.o $(OBJDIR)/json.o
+XCRUN_OBJS := $(OBJDIR)/xcrun.o
 
 XSELECT      := $(BUILD_DIR)/xcode-select
 XSELECT_OBJS := $(OBJDIR)/xcode-select.o
@@ -113,8 +111,7 @@ $(LIBXCRUN): $(LIBXCRUN_OBJS) src/libxcrun/libxcrun.exports
 
 $(XCRUN): $(XCRUN_OBJS) $(LIB)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $(XCRUN_OBJS) -L $(BUILD_DIR) -lxcselect $(RPATHS) \
-		-framework CoreFoundation
+	$(CC) $(CFLAGS) -o $@ $(XCRUN_OBJS) -L $(BUILD_DIR) -lxcselect $(RPATHS)
 
 $(XSELECT): $(XSELECT_OBJS) $(LIB)
 	@mkdir -p $(BUILD_DIR)
@@ -130,8 +127,7 @@ $(OBJDIR)/libxcrun.o: src/libxcrun/libxcrun.c src/xcrun/ini.h \
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ src/libxcrun/libxcrun.c
 
-$(OBJDIR)/xcrun.o: src/xcrun/xcrun.c src/xcrun/ini.h src/common/devpath.h \
-                   src/common/sdkpath.h src/libxcselect/xcselect.h
+$(OBJDIR)/xcrun.o: src/xcrun/xcrun.c src/libxcselect/xcselect.h
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ src/xcrun/xcrun.c
 

@@ -9,10 +9,6 @@
 /* Begin PBXBuildFile section */
 		FE0000000000000000000001 /* libxcselect.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000011 /* libxcselect.c */; };
 		FE0000000000000000000003 /* xcrun.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000014 /* xcrun.c */; };
-		FE0000000000000000000004 /* ini.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000015 /* ini.c */; };
-		FE0000000000000000000005 /* sdkpath.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000020 /* sdkpath.c */; };
-		FE0000000000000000000006 /* cfplist.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000022 /* cfplist.c */; };
-		FE0000000000000000000007 /* json.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000024 /* json.c */; };
 		FE000000000000000000000A /* xcode-select.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000018 /* xcode-select.c */; };
 		FE000000000000000000000B /* libxcrun.c in Sources */ = {isa = PBXBuildFile; fileRef = FE000000000000000000002A /* libxcrun.c */; };
 		FE000000000000000000000C /* ini.c in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000015 /* ini.c */; };
@@ -288,10 +284,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				FE0000000000000000000003 /* xcrun.c in Sources */,
-				FE0000000000000000000004 /* ini.c in Sources */,
-				FE0000000000000000000005 /* sdkpath.c in Sources */,
-				FE0000000000000000000006 /* cfplist.c in Sources */,
-				FE0000000000000000000007 /* json.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -421,9 +413,7 @@
 				GCC_C_LANGUAGE_STANDARD = c11;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/src/common",
 					"$(SRCROOT)/src/libxcselect",
-					"$(SRCROOT)/src/xcrun",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(CONFIGURATION_BUILD_DIR)",
@@ -442,8 +432,6 @@
 				OTHER_LDFLAGS = (
 					"-L$(CONFIGURATION_BUILD_DIR)",
 					"-lxcselect",
-					"-framework",
-					CoreFoundation,
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
@@ -457,9 +445,7 @@
 				GCC_C_LANGUAGE_STANDARD = c11;
 				GCC_OPTIMIZATION_LEVEL = 3;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/src/common",
 					"$(SRCROOT)/src/libxcselect",
-					"$(SRCROOT)/src/xcrun",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(CONFIGURATION_BUILD_DIR)",
@@ -478,8 +464,6 @@
 				OTHER_LDFLAGS = (
 					"-L$(CONFIGURATION_BUILD_DIR)",
 					"-lxcselect",
-					"-framework",
-					CoreFoundation,
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
