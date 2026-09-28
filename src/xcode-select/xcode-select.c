@@ -35,6 +35,8 @@
 #include <getopt.h>
 #include <limits.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -47,10 +49,29 @@
  * file's own revision.
  */
 #define TOOL_VERSION "2416"
-#define SDK_CFG ".xcdev.dat"
-#ifndef XCRUN_DEFAULT_DEVELOPER_DIR
-#define XCRUN_DEFAULT_DEVELOPER_DIR "/Library/Developer/CommandLineTools"
+
+/*
+ * Where a selection is recorded, the same places and the same order the
+ * library that reads it back consults (see dev_dir_links and
+ * XCSELECT_DEV_DIR_FILE in libxcselect.c, which owns the list): the
+ * three symlinks first, then the file holding the path.  Recording one
+ * way and reading the other would make -s succeed and -p not see it, so
+ * the two must agree.  A test build redirects the roots with these
+ * macros; the empty default is the system selection itself.
+ */
+#ifndef XC_SELECT_WRITE_ROOT
+#define XC_SELECT_WRITE_ROOT ""
 #endif
+
+static const char * const dev_dir_links[] = {
+	XC_SELECT_WRITE_ROOT "/var/select/developer_dir",
+	XC_SELECT_WRITE_ROOT "/var/db/xcode_select_link",
+	XC_SELECT_WRITE_ROOT "/usr/share/xcode-select/xcode_dir_link",
+	NULL
+};
+
+#define XC_SELECT_DEV_DIR_FILE \
+	XC_SELECT_WRITE_ROOT "/usr/share/xcode-select/xcode_dir_path"
 
 /*
  * The help, laid out as the tool that ships it lays it out: the
@@ -99,28 +120,6 @@ static void version(void)
 }
 
 /**
- * @func validate_directory_path -- validate if requested directory path exists
- * @arg dir - directory to validate
- * @return: 0 on success, 1 on failure
- */
-static int validate_directory_path(const char *dir)
-{
-	struct stat fstat;
-	int retval = 1;
-
-	if (stat(dir, &fstat) != 0)
-		fprintf(stderr, "xcode-select: error: unable to validate directory \'%s\' (errno=%s)\n", dir, strerror(errno));
-	else {
-		if (S_ISDIR(fstat.st_mode) == 0)
-			fprintf(stderr, "xcode-select: error: \'%s\' is not a directory, please try a different path\n", dir);
-		else
-			retval = 0;
-	}
-
-	return retval;
-}
-
-/**
  * @func get_developer_path -- retrieve current developer path
  * @return: string of current path on success, NULL string on failure
  */
@@ -149,35 +148,86 @@ static char *get_developer_path(void)
 
 /**
  * @func set_developer_path -- set the current developer path
- * @arg path - path to set
+ * @arg path - path to set, the resolved developer directory
  * @return: 0 on success, -1 on failure
+ *
+ * The selection is one the whole system reads, so it is recorded the
+ * way the shipped tool records it: any earlier choice is unlinked (its
+ * absence is not an error), the three links are laid down pointing at
+ * the path, and the path is written to the data file with its trailing
+ * newline -- the one trailing newline the library's reader strips.
  */
 static int set_developer_path(const char *path)
 {
-	FILE *fp = NULL;
-	char *pathtocfg = NULL;
-	char cfg_path[PATH_MAX];
+	int i;
 
-	if ((pathtocfg = getenv("HOME")) == NULL) {
-		fprintf(stderr, "xcode-select: error: failed to read HOME variable.\n");
-		return -1;
+	for (i = 0; dev_dir_links[i] != NULL; i++) {
+		if (unlink(dev_dir_links[i]) != 0 && errno != ENOENT) {
+			fprintf(stderr, "%s: error: unable to remove existing"
+			    " data link at '%s' (%s).\n", getprogname(),
+			    dev_dir_links[i], strerror(errno));
+			return -1;
+		}
 	}
 
-	if (snprintf(cfg_path, sizeof(cfg_path), "%s/%s", pathtocfg,
-	    SDK_CFG) >= (int)sizeof(cfg_path)) {
-		fprintf(stderr, "xcode-select: error: configuration path too"
-		    " long.\n");
-		return -1;
+	for (i = 0; dev_dir_links[i] != NULL; i++) {
+		if (symlink(path, dev_dir_links[i]) != 0) {
+			fprintf(stderr, "%s: error: unable to create data link"
+			    " (%s).\n", getprogname(), strerror(errno));
+			return -1;
+		}
 	}
 
-	if ((fp = fopen(cfg_path, "w+")) != NULL) {
-		fwrite(path, 1, strlen(path), fp);
-		fclose(fp);
-	} else {
-		fprintf(stderr, "xcode-select: error: unable to open configuration file. (errno=%s)\n", strerror(errno));
-		return -1;
+	{
+		int fd;
+		size_t len = strlen(path);
+
+		fd = open(XC_SELECT_DEV_DIR_FILE, O_WRONLY | O_CREAT | O_TRUNC,
+		    0644);
+		if (fd < 0) {
+			fprintf(stderr, "%s: error: unable to write data file"
+			    " (%s).\n", getprogname(), strerror(errno));
+			return -1;
+		}
+		if (write(fd, path, len) != (ssize_t)len ||
+		    write(fd, "\n", 1) != 1 || close(fd) != 0) {
+			fprintf(stderr, "%s: error: unable to write data file"
+			    " (%s).\n", getprogname(), strerror(errno));
+			return -1;
+		}
 	}
 
+	return 0;
+}
+
+/**
+ * @func clear_developer_path -- clear the current developer path
+ * @return: 0 on success, -1 on failure
+ *
+ * The reset is a clearing, not a writing: nothing being selected is
+ * what makes the library fall back to the system defaults, so --reset
+ * removes the selection instead of choosing a directory.  No default
+ * path needs to exist for the clearing to succeed.
+ */
+static int clear_developer_path(void)
+{
+	int i;
+
+	for (i = 0; dev_dir_links[i] != NULL; i++) {
+		if (unlink(dev_dir_links[i]) != 0 && errno != ENOENT) {
+			fprintf(stderr, "%s: error: unable to remove existing"
+			    " data link at '%s' (%s).\n", getprogname(),
+			    dev_dir_links[i], strerror(errno));
+			return -1;
+		}
+	}
+
+	if (unlink(XC_SELECT_DEV_DIR_FILE) != 0 && errno != ENOENT) {
+		fprintf(stderr, "%s: error: unable to remove file at '%s'"
+		    " (%s).\n", getprogname(), XC_SELECT_DEV_DIR_FILE,
+		    strerror(errno));
+		return -1;
+	}
 
 	return 0;
 }
@@ -383,7 +433,7 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 
-		return set_developer_path(path) == 0 ? 0 : 1;
+		return set_developer_path(found) == 0 ? 0 : 1;
 	}
 
 	if (reset_f == 1) {
@@ -394,12 +444,7 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 
-		/* Back to the default command line tools path. */
-		if (validate_directory_path(XCRUN_DEFAULT_DEVELOPER_DIR) == 0)
-			return set_developer_path(XCRUN_DEFAULT_DEVELOPER_DIR) == 0 ? 0 : 1;
-		fprintf(stderr, "xcode-select: error: unable to determine the"
-		    " default developer directory.\n");
-		return 1;
+		return clear_developer_path() == 0 ? 0 : 1;
 	}
 
 	return 0;
