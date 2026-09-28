@@ -61,14 +61,14 @@ RPATHS := -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../lib \
 LIB      := $(BUILD_DIR)/libxcselect.dylib
 LIB_OBJS := $(OBJDIR)/libxcselect.o
 
-# xcrun carries the vendored common/ plist and SDK-settings reader with it;
-# every one of these objects is reached, none is dead weight.  devpath.c is
-# the one common/ file xcrun does not need: it includes devpath.h but never
-# calls into it.
+# xcrun carries the vendored common/ SDK-settings reader with it; every one of
+# these objects is reached, none is dead weight.  devpath.c is the one common/
+# file xcrun does not need: it includes devpath.h but never calls into it.
+# cfplist.c is the CoreFoundation property list reader sdkpath.c asks for the
+# plists in, so xcrun names CoreFoundation at link time.
 XCRUN      := $(BUILD_DIR)/xcrun
 XCRUN_OBJS := $(OBJDIR)/xcrun.o $(OBJDIR)/ini.o $(OBJDIR)/sdkpath.o \
-	      $(OBJDIR)/plist.o $(OBJDIR)/json.o $(OBJDIR)/xmlplist.o \
-	      $(OBJDIR)/bplist.o
+	      $(OBJDIR)/cfplist.o $(OBJDIR)/json.o
 
 XSELECT      := $(BUILD_DIR)/xcode-select
 XSELECT_OBJS := $(OBJDIR)/xcode-select.o
@@ -84,7 +84,8 @@ $(LIB): $(LIB_OBJS)
 
 $(XCRUN): $(XCRUN_OBJS) $(LIB)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $(XCRUN_OBJS) -L $(BUILD_DIR) -lxcselect $(RPATHS)
+	$(CC) $(CFLAGS) -o $@ $(XCRUN_OBJS) -L $(BUILD_DIR) -lxcselect $(RPATHS) \
+		-framework CoreFoundation
 
 $(XSELECT): $(XSELECT_OBJS) $(LIB)
 	@mkdir -p $(BUILD_DIR)
@@ -103,25 +104,17 @@ $(OBJDIR)/ini.o: src/xcrun/ini.c src/xcrun/ini.h
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ src/xcrun/ini.c
 
-$(OBJDIR)/sdkpath.o: src/common/sdkpath.c src/common/sdkpath.h src/common/plist.h
+$(OBJDIR)/sdkpath.o: src/common/sdkpath.c src/common/sdkpath.h src/common/cfplist.h
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ src/common/sdkpath.c
 
-$(OBJDIR)/plist.o: src/common/plist.c src/common/plist.h
+$(OBJDIR)/cfplist.o: src/common/cfplist.c src/common/cfplist.h
 	@mkdir -p $(OBJDIR)
-	$(CC) $(CFLAGS) -c -o $@ src/common/plist.c
+	$(CC) $(CFLAGS) -c -o $@ src/common/cfplist.c
 
 $(OBJDIR)/json.o: src/common/json.c src/common/json.h
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ src/common/json.c
-
-$(OBJDIR)/xmlplist.o: src/common/xmlplist.c src/common/plist.h
-	@mkdir -p $(OBJDIR)
-	$(CC) $(CFLAGS) -c -o $@ src/common/xmlplist.c
-
-$(OBJDIR)/bplist.o: src/common/bplist.c src/common/plist.h
-	@mkdir -p $(OBJDIR)
-	$(CC) $(CFLAGS) -c -o $@ src/common/bplist.c
 
 $(OBJDIR)/xcode-select.o: src/xcode-select/xcode-select.c src/libxcselect/xcselect.h
 	@mkdir -p $(OBJDIR)

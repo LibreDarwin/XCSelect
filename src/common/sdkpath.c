@@ -13,7 +13,9 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "plist.h"
+#include <CoreFoundation/CoreFoundation.h>
+
+#include "cfplist.h"
 #include "sdkpath.h"
 
 static int
@@ -462,62 +464,32 @@ xt_foreach_sdk(const char *devdir, xt_sdk_cb cb, void *ctx)
 	return found;
 }
 
-/*
- * Read a plist wholesale.  These files are small -- a few kilobytes at
- * most -- so there is no reason to stream them.
- */
-static plist_node *
-read_plist(const char *path)
-{
-	plist_node *root;
-	struct stat st;
-	char *text;
-	size_t got;
-	FILE *fp;
-
-	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
-		return NULL;
-	if ((fp = fopen(path, "r")) == NULL)
-		return NULL;
-	if ((text = malloc((size_t)st.st_size + 1)) == NULL) {
-		fclose(fp);
-		return NULL;
-	}
-
-	got = fread(text, 1, (size_t)st.st_size, fp);
-	fclose(fp);
-	text[got] = '\0';
-
-	root = plist_parse_any(text, got);
-	free(text);
-
-	return root;
-}
-
 static char *
 sdk_string(const char *sdkpath, const char *section, const char *key)
 {
 	char path[PATH_MAX];
-	plist_node *root, *dict, *node;
-	char *value = NULL;
+	CFDictionaryRef root, dict;
+	char *value;
 
 	if (sdkpath == NULL || key == NULL)
 		return NULL;
 
 	snprintf(path, sizeof(path), "%s/SDKSettings.plist", sdkpath);
-	if ((root = read_plist(path)) == NULL)
+	if ((root = cfplist_read(path)) == NULL)
 		return NULL;
 
 	dict = root;
-	if (section != NULL && (dict = plist_dict_get(root, section)) == NULL) {
-		plist_free(root);
-		return NULL;
+	if (section != NULL) {
+		dict = (CFDictionaryRef)cfplist_get(root, section);
+		if (dict == NULL || CFGetTypeID(dict) != CFDictionaryGetTypeID()) {
+			CFRelease(root);
+			return NULL;
+		}
 	}
 
-	if ((node = plist_dict_get(dict, key)) != NULL && node->string != NULL)
-		value = strdup(node->string);
+	value = cfplist_string(dict, key);
+	CFRelease(root);
 
-	plist_free(root);
 	return value;
 }
 
@@ -544,20 +516,19 @@ char *
 xt_platform_setting(const char *platformpath, const char *key)
 {
 	char path[PATH_MAX];
-	plist_node *root, *node;
-	char *value = NULL;
+	CFDictionaryRef root;
+	char *value;
 
 	if (platformpath == NULL || key == NULL)
 		return NULL;
 
 	snprintf(path, sizeof(path), "%s/Info.plist", platformpath);
-	if ((root = read_plist(path)) == NULL)
+	if ((root = cfplist_read(path)) == NULL)
 		return NULL;
 
-	if ((node = plist_dict_get(root, key)) != NULL && node->string != NULL)
-		value = strdup(node->string);
+	value = cfplist_string(root, key);
+	CFRelease(root);
 
-	plist_free(root);
 	return value;
 }
 
@@ -565,21 +536,19 @@ char *
 xt_toolchain_identifier(const char *tcpath)
 {
 	char path[PATH_MAX];
-	plist_node *root, *node;
-	char *value = NULL;
+	CFDictionaryRef root;
+	char *value;
 
 	if (tcpath == NULL)
 		return NULL;
 
 	snprintf(path, sizeof(path), "%s/ToolchainInfo.plist", tcpath);
-	if ((root = read_plist(path)) == NULL)
+	if ((root = cfplist_read(path)) == NULL)
 		return NULL;
 
-	if ((node = plist_dict_get(root, "Identifier")) != NULL &&
-	    node->string != NULL)
-		value = strdup(node->string);
+	value = cfplist_string(root, "Identifier");
+	CFRelease(root);
 
-	plist_free(root);
 	return value;
 }
 
@@ -595,21 +564,19 @@ char *
 xt_sdk_build_version(const char *sdkpath)
 {
 	char path[PATH_MAX];
-	plist_node *root, *node;
-	char *value = NULL;
+	CFDictionaryRef root;
+	char *value;
 
 	if (sdkpath == NULL)
 		return NULL;
 
 	snprintf(path, sizeof(path), "%s/System/Library/CoreServices/"
 	    "SystemVersion.plist", sdkpath);
-	if ((root = read_plist(path)) == NULL)
+	if ((root = cfplist_read(path)) == NULL)
 		return NULL;
 
-	if ((node = plist_dict_get(root, "ProductBuildVersion")) != NULL &&
-	    node->string != NULL)
-		value = strdup(node->string);
+	value = cfplist_string(root, "ProductBuildVersion");
+	CFRelease(root);
 
-	plist_free(root);
 	return value;
 }
