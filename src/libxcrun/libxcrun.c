@@ -354,6 +354,42 @@ static void no_utility_named(void)
  * exits EX_OSFILE rather than EX_USAGE.  The sh -c line above it has
  * already said what was tried.
  */
+/**
+ * @func named_path -- the tool as a path, when the caller named one
+ * @arg name - the tool name as the caller wrote it
+ * @return: the path to run, or NULL when the name is a name to search for
+ *
+ * A name holding a slash is a path and not a name, and is never looked
+ * for: "xcrun /usr/bin/clang" runs that file and says nothing about
+ * whether any directory on the search list has a clang of its own.  So
+ * it is answered even when nothing is there -- "xcrun --find
+ * /nonexistent/tool" prints the path and succeeds, and only running it
+ * fails -- and the search, the toolchain and xcodebuild are all skipped.
+ *
+ * A relative path is made absolute against the current directory and
+ * left as written otherwise, so "./tool" is reported as
+ * "<cwd>/./tool" and not tidied into a canonical path.  Apple does not
+ * resolve the dots either, and the difference is visible in what --find
+ * prints.
+ */
+static char *named_path(const char *name)
+{
+	char cwd[PATH_MAX], *path;
+
+	if (name == NULL || strchr(name, '/') == NULL)
+		return NULL;
+
+	if (name[0] == '/')
+		return strdup(name);
+
+	if (getcwd(cwd, sizeof(cwd)) == NULL)
+		return NULL;
+	if (asprintf(&path, "%s/%s", cwd, name) < 0)
+		return NULL;
+
+	return path;
+}
+
 static void no_such_utility(const char *name)
 {
 	fprintf(stderr, "%s: error: unable to find utility \"%s\", not a developer tool or in PATH\n",
@@ -1289,7 +1325,17 @@ static int request_command(const char *name, int argc, char *argv[])
 		 * something else entirely, and the shipped library goes on
 		 * looking for it, so this leaves the search empty rather
 		 * than stopping, and the tools further down still answer.
-		 */
+		 *
+	 * Where they answer is the other half of it.  A flat Command Line
+	 * Tools layout resolves no SDK through a toolchain, so its usr/bin
+	 * is there to be found and "xcrun --sdk bogus clang" still runs
+	 * clang.  Where toolchains are kept, the tool for a named SDK is
+	 * xcodebuild's to locate, and an SDK it cannot find is a toolchain
+	 * it has nothing to search: so there the developer dir's tools and
+	 * the caller's PATH are taken out of the search as well, leaving
+	 * xcodebuild to answer and fail.  A name that is a path is not
+	 * searched for at all, so it never reaches here.
+	 */
 		char *sdk = sdk_path_or_null(current_sdk);
 
 		if (sdk != NULL) {
@@ -1300,6 +1346,8 @@ static int request_command(const char *name, int argc, char *argv[])
 		}
 		if (toolch_name != NULL)
 			sprintf(search_string, "%s/usr/bin", get_toolchain_path(toolch_name));
+		else if (devdir_has_toolchains())
+			narrow_to_sdk_only = 1;
 	} else if (explicit_toolchain_mode == 1) {
 		sprintf(search_string, "%s/usr/bin", get_toolchain_path(current_toolchain));
 	} else if (alternate_sdk_path != NULL && validate_directory_path(alternate_sdk_path) == (-1)) {
@@ -1472,12 +1520,12 @@ static int xcrun_parse_args(int argc, char *argv[])
 					break;
 				case 'r':
 					run_f = 1;
-					tool_called = dup_basename(optarg);
+					tool_called = strdup(optarg);
 					++argc_offset;
 					break;
 				case 'f':
 					find_f = 1;
-					tool_called = dup_basename(optarg);
+					tool_called = strdup(optarg);
 					++argc_offset;
 					break;
 				case SHOW_SDK_PATH:
@@ -1594,13 +1642,13 @@ static int xcrun_parse_args(int argc, char *argv[])
 				break;
 		}
 	} else { /* We are just executing a program. */
-		tool_called = dup_basename(argv[1]);
+		tool_called = strdup(argv[1]);
 		++argc_offset;
 	}
 
 	/* The last non-option argument may be the command called. */
 	if (optind < argc && ((run_f == 0 || find_f == 0) && tool_called == NULL)) {
-		tool_called = dup_basename(argv[optind++]);
+		tool_called = strdup(argv[optind++]);
 		++argc_offset;
 	}
 
@@ -1750,22 +1798,50 @@ static int xcrun_parse_args(int argc, char *argv[])
 	if (find_f == 1) {
 		char *path;
 
-		finding_mode = 1;
-		if (request_command(tool_called, 0, NULL) != -1)
-			retval = 0;
-		else if ((path = xcodebuild_find_path(tool_called)) != NULL) {
+		/*
+		 * A path was named, so it is what gets printed -- whether or not
+		 * it is there.  Finding out is the caller's to do, not this
+		 * tool's: --find answers where a name would resolve to, and a
+		 * name the caller already spelled out has nowhere else to go.
+		 */
+		if ((path = named_path(tool_called)) != NULL) {
 			fprintf(stdout, "%s\n", path);
 			free(path);
 			retval = 0;
-		} else
-			no_such_utility(tool_called);
+		} else {
+			finding_mode = 1;
+			if (request_command(tool_called, 0, NULL) != -1)
+				retval = 0;
+			else if ((path = xcodebuild_find_path(tool_called)) != NULL) {
+				fprintf(stdout, "%s\n", path);
+				free(path);
+				retval = 0;
+			} else
+				no_such_utility(tool_called);
+		}
 	}
 
 	/* Search and execute program. (default behavior) */
 	if (find_f != 1) {
 		char *path;
 
-		if (request_command(tool_called, (argc - argc_offset),  (argv += ((argc - argc_offset) - (argc - argc_offset) + (argc_offset)))) != -1)
+		if ((path = named_path(tool_called)) != NULL) {
+			/*
+			 * Nothing was searched, so a file that will not run is
+			 * the only thing that can go wrong, and it is reported
+			 * as the exec that failed rather than as a missing
+			 * utility: the caller gave us the file, so it exists
+			 * or it does not, and no directory list is involved.
+			 * EX_OSERR rather than the EX_OSFILE above, which is
+			 * for a name no search could place.
+			 */
+			call_command(path, argc - argc_offset, argv);
+			/* NOREACH */
+			fprintf(stderr, "xcrun: error: can't exec \'%s\' (errno=%s)\n",
+			    path, strerror(errno));
+			exit(EX_OSERR);
+		}
+		else if (request_command(tool_called, (argc - argc_offset),  (argv += ((argc - argc_offset) - (argc - argc_offset) + (argc_offset)))) != -1)
 			retval = -1; /* NOREACH */
 		/*
 		 * Not in any of the directories searched above, but the
