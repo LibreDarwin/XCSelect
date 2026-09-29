@@ -63,15 +63,31 @@
 /* The toolchain a shipped developer directory is built around. */
 #define XCSELECT_DEFAULT_TOOLCHAIN "XcodeDefault.xctoolchain"
 
+/*
+ * Where a selection is recorded, and the four places it may be.  These
+ * are the same four paths the writer in xcode-select.c lays down, and
+ * the two lists have to agree: recording one way and reading the other
+ * makes -s succeed and -p not see it.
+ *
+ * A test build lowers all four under a scratch root with this, the same
+ * way the writer's XC_SELECT_WRITE_ROOT does, so that a selection can be
+ * written and then read back without root and without touching the
+ * system's own.  The empty default is the system selection itself.
+ */
+#ifndef XC_SELECT_WRITE_ROOT
+#define XC_SELECT_WRITE_ROOT ""
+#endif
+
 /* The symlinks consulted, in order, for a directory someone has selected. */
 static const char * const dev_dir_links[] = {
-	"/var/select/developer_dir",
-	"/var/db/xcode_select_link",
-	"/usr/share/xcode-select/xcode_dir_link",
+	XC_SELECT_WRITE_ROOT "/var/select/developer_dir",
+	XC_SELECT_WRITE_ROOT "/var/db/xcode_select_link",
+	XC_SELECT_WRITE_ROOT "/usr/share/xcode-select/xcode_dir_link",
 };
 
 /* Where a selection may be recorded as a file rather than a symlink. */
-#define XCSELECT_DEV_DIR_FILE	"/usr/share/xcode-select/xcode_dir_path"
+#define XCSELECT_DEV_DIR_FILE \
+	XC_SELECT_WRITE_ROOT "/usr/share/xcode-select/xcode_dir_path"
 
 /* Used when nothing has been selected. */
 static const struct {

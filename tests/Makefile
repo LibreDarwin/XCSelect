@@ -55,10 +55,11 @@ matrix: all
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} bash xcrunmatrix.sh
 
 # The write side, -s and -r, against a sandbox.  Also not part of check:
-# it compiles a second xcode-select with XC_SELECT_WRITE_ROOT lowered into
-# a scratch tree and links tests/rootstub.c's geteuid(), so it needs the
-# SDK and CC the products were built with, and it is the one harness here
-# that is not a plain differential script.
+# it compiles a second xcode-select and libxcselect with
+# XC_SELECT_WRITE_ROOT lowered into a scratch tree and links
+# tests/rootstub.c's geteuid(), so it needs the SDK and CC the products
+# were built with, and it is the one harness here that is not a plain
+# differential script.
 sandbox: all
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} sh sandbox.sh
 

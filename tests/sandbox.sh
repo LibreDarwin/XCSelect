@@ -9,22 +9,28 @@
 # the gate out of the source, which would mean the thing under test is no
 # longer the thing that ships.
 #
-# The gate is not defeated here, it is stood on.  A second xcode-select is
-# compiled from the same source with XC_SELECT_WRITE_ROOT set to a scratch
-# directory, which lowers all four write paths (the three data links and
-# the data file) under it, and linked with rootstub.o, whose geteuid()
-# returns zero.  So the check does the write, the gate does its job, and
-# the only bytes anywhere near it are in a mktemp directory that is
-# removed on the way out.  Nothing outside XS_SANDBOX is read or written,
-# and the real /var/select, /var/db and /usr/share selection is not
-# touched -- which is also why this cannot prove anything about the real
-# paths, only about the code that uses them.
+# The gate is not defeated here, it is stood on.  A second xcode-select and
+# a second libxcselect are compiled from the same sources with
+# XC_SELECT_WRITE_ROOT set to a scratch directory, which lowers all four
+# write paths (the three data links and the data file) under it, and the
+# tool is linked with rootstub.o, whose geteuid() returns zero.  So the
+# check does the write, the gate does its job, and the only bytes anywhere
+# near it are in a mktemp directory that is removed on the way out.
+# Nothing outside it is read or written, and the real /var/select, /var/db
+# and /usr/share selection is not touched -- which is also why this cannot
+# prove anything about the real paths, only about the code that uses them.
+#
+# Both halves are recompiled, not just the writer.  The reader needs the
+# macro too, or -p has no way to look at the sandbox: DEVELOPER_DIR is not
+# a substitute, because it overrides the selection outright, so -p would
+# echo it back and the run would prove nothing.  Recompiling the reader is
+# what makes the read-back below an actual read of what was written.
 #
 # The sandbox needs the four parent directories to exist, because the code
 # links the files into paths that are not created for it; the real ones
-# are made by the installer.  The fixture developer directory is the
-# FAKE.app under XS_FIX, since -s validates the path it is given before
-# writing anything.
+# are made by the installer.  -s validates the directory it is given, so
+# the target has to be a developer directory: the FAKE.app under XS_FIX is
+# used when it is there, and one is built in the scratch directory if not.
 #
 # Runs as a normal user.  Needs the same SDK and CC as the products, or
 # set XC_TEST_SDK / XC_TEST_CC to override.
@@ -69,16 +75,36 @@ bad() {
 # Builds the sandboxed tool.  The write root is absolute so the four
 # lowered paths are the same strings the real tool would use with a root
 # prepended, and the links it makes can be read back and compared.
+#
+# Both halves of the read/write pair are rebuilt against the same root:
+# libxcselect is compiled here rather than linked from build/release,
+# because the reader's own copy of the four paths is what -p consults, and
+# pointing only the writer at the sandbox would leave -p reading the
+# system's real selection -- a comparison that would pass while proving
+# nothing.
 mkdir -p "$BIN" || exit 2
+WROOT=-DXC_SELECT_WRITE_ROOT="\"$SB\""
 "$CC" $OPT \
     -std=c11 -D_DARWIN_C_SOURCE -isysroot "$SDK" -Wall -Wextra \
     -Wno-unused-parameter -fblocks \
     -I "$REPO/src/common" -I "$REPO/src/libxcselect" \
-    -DXC_SELECT_WRITE_ROOT="\"$SB\"" \
+    "$WROOT" -dynamiclib -o "$BIN/libxcselect-sandbox.dylib" \
+    "$REPO/src/libxcselect/libxcselect.c" 2>$ST/cc.err
+if [ $? -ne 0 ]; then
+    echo "sandbox: library build failed" >&2
+    cat $ST/cc.err >&2
+    exit 2
+fi
+
+"$CC" $OPT \
+    -std=c11 -D_DARWIN_C_SOURCE -isysroot "$SDK" -Wall -Wextra \
+    -Wno-unused-parameter -fblocks \
+    -I "$REPO/src/common" -I "$REPO/src/libxcselect" \
+    "$WROOT" \
     -o "$WS" "$REPO/src/xcode-select/xcode-select.c" \
     "$REPO/tests/rootstub.c" \
-    -L "$REPO/build/$CONFIG" -lxcselect \
-    -Wl,-rpath,"$REPO/build/$CONFIG" 2>$ST/cc.err
+    -L "$BIN" -lxcselect-sandbox \
+    -Wl,-rpath,"$BIN" 2>$ST/cc.err
 if [ $? -ne 0 ]; then
     echo "sandbox: build failed" >&2
     cat $ST/cc.err >&2
@@ -116,10 +142,17 @@ inspect() {
     fi
 }
 
+# -s validates the path it is given before writing anything, so a target
+# has to be a directory libxcselect recognizes.  The fixture root's
+# FAKE.app is used when it is there; otherwise one is built here, because
+# a harness that only runs on a machine that has already been set up by
+# hand is not a harness.  The shape is the smallest that passes: a
+# Contents/Developer that exists, since that is what
+# xcselect_find_developer_contents_from_path looks for.
 TARGET=$FIX/FAKE.app
 if [ ! -d "$TARGET/Contents/Developer" ]; then
-    echo "sandbox: fixture $TARGET/Contents/Developer missing; set XS_FIX" >&2
-    exit 2
+    TARGET=$ST/FAKE.app
+    mkdir -p "$TARGET/Contents/Developer" || exit 2
 fi
 
 # 1. A fresh sandbox has nothing in it, and -r on that is a no-op that
@@ -153,30 +186,50 @@ else
     bad "switch writes three links and the data file" "rc/out: [$out]"
 fi
 
-# 3. The reader is a separate library with its own copy of these four
-#    paths, and its paths are not lowered, so -p cannot be run against the
-#    sandbox: DEVELOPER_DIR would override the selection outright and
-#    with no root macro in libxcselect there is no way to point its
-#    lookup at the sandbox short of root.  What can be checked is the
-#    thing that actually makes -s and -p agree -- that the two lists name
-#    the same four files, since recording one way and reading the other
-#    is exactly the failure this guards against.  Basenames are compared
-#    because the sandbox only moves the root, not the layout under it.
-writer=$(sed -n '/dev_dir_links\[\] *= *{/,/};/p' \
-    "$REPO/src/xcode-select/xcode-select.c" | sed -n 's/.*WRITE_ROOT *"\([^"]*\)".*/\1/p')
-writer=$writer$(sed -n 's/^#define *XC_SELECT_DEV_DIR_FILE.*WRITE_ROOT *"\([^"]*\)".*/\1/p' \
-    "$REPO/src/xcode-select/xcode-select.c")
-reader=$(sed -n '/dev_dir_links\[\] *= *{/,/};/p' "$REPO/src/libxcselect/libxcselect.c" |
-    sed -n 's/.*"\([^"]*\)".*/\1/p')
-reader=$reader$(sed -n 's/^#define *XCSELECT_DEV_DIR_FILE *"\([^"]*\)".*/\1/p' \
-    "$REPO/src/libxcselect/libxcselect.c")
-w=$(echo "$writer" | while read -r p; do basename "$p"; done | tr '\n' ' ')
-r=$(echo "$reader" | while read -r p; do basename "$p"; done | tr '\n' ' ')
-if [ "$w" = "$r" ] && [ -n "$w" ]; then
-    ok "the writer and the reader name the same four paths"
+# 3. The tool reads its own selection back.  This is the row the whole
+#    harness exists for: -s and -p are the two halves of one contract,
+#    and a -s that succeeded while -p disagreed would leave the system
+#    selecting something nobody asked for.  Both halves read and write the
+#    same sandbox root here, so this is a real read-back and not a
+#    comparison of two hardcoded strings.
+mkroot || exit 2
+"$WS" -s "$TARGET" >/dev/null 2>&1
+got=$("$WS" -p 2>&1)
+want=$TARGET/Contents/Developer
+if [ "$got" = "$want" ]; then
+    ok "print-path reads back what switch wrote"
 else
-    bad "the writer and the reader name the same four paths" \
-        "writer: [$w]" "reader: [$r]"
+    bad "print-path reads back what switch wrote" \
+        "got: [$got]" "want: [$want]"
+fi
+
+# 3b. The two lists are still compared directly, because the read-back
+#     above would pass even if both sides moved to a fifth path together:
+#     the read-back proves the halves agree, not that they are the paths
+#     the system uses.  Only this does that.
+#     the paths the system uses.  Only this does that.
+#
+# Each side's four paths are read out of its own source -- the three in
+# dev_dir_links and the one behind the data-file macro -- and reduced to
+# basenames, since a macro only prepends a root and renames nothing.  The
+# system paths are spelled out here rather than taken from either source,
+# so a path edited on one side and copied to the other is caught instead
+# of being confirmed twice.
+paths_of() {
+    sed -n '/dev_dir_links\[\] *= *{/,/};/p' "$1" |
+        sed -n 's/.*WRITE_ROOT *"\([^"]*\)".*/\1/p'
+    grep -A1 '^#define *\(XC_SELECT_DEV_DIR_FILE\|XCSELECT_DEV_DIR_FILE\)' "$1" |
+        sed -n 's/.*WRITE_ROOT *"\([^"]*\)".*/\1/p'
+}
+basenames() { while read -r p; do basename "$p"; done | tr '\n' ' '; }
+w=$(paths_of "$REPO/src/xcode-select/xcode-select.c" | basenames)
+r=$(paths_of "$REPO/src/libxcselect/libxcselect.c" | basenames)
+sys="developer_dir xcode_select_link xcode_dir_link xcode_dir_path "
+if [ "$w" = "$r" ] && [ -n "$w" ] && [ "$w" = "$sys" ]; then
+    ok "both halves name the same four system paths"
+else
+    bad "both halves name the same four system paths" \
+        "writer: [$w]" "reader: [$r]" "system: [$sys]"
 fi
 
 # 4. A second -s replaces the first, and does not accumulate: the links
@@ -184,7 +237,7 @@ fi
 #    not left behind beside the new one.
 mkroot || exit 2
 "$WS" -s "$TARGET" >/dev/null 2>&1
-if out=$("$WS" -s "$FIX/FAKE.app" 2>&1) && [ -z "$out" ]; then
+if out=$("$WS" -s "$TARGET" 2>&1) && [ -z "$out" ]; then
     n=$(inspect | grep -c '^link ')
     if [ "$n" -eq 3 ]; then
         ok "second switch replaces rather than accumulates"
@@ -216,6 +269,19 @@ absent xcode_dir_path"
 else
     bad "reset clears all four and writes nothing" "rc/out: [$out]"
 fi
+
+# 5b. -p on an empty sandbox falls back to the system default rather than
+#     reporting the machine's real selection.  This is what proves the
+#     read-back above is really reading the sandbox: if -p were still
+#     consulting /usr/share, this row would print whatever this machine
+#     has selected and the row after it would be vacuous.
+mkroot || exit 2
+got=$("$WS" -p 2>&1)
+case $got in
+    "$SB"*) bad "an empty sandbox reads as the system default" "got: [$got]" ;;
+    ""|/*) ok "an empty sandbox reads as the system default" ;;
+    *) bad "an empty sandbox reads as the system default" "got: [$got]" ;;
+esac
 
 # 6. -s refuses a path that is not a developer directory, and refuses it
 #    before writing: the sandbox is untouched by a rejected switch.

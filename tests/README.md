@@ -87,7 +87,8 @@ target and stands on the gate instead of defeating it:
 
   rootstub.c   a geteuid() returning 0, linked into the sandboxed build
   xcode-select.c
-               recompiled with XC_SELECT_WRITE_ROOT set to a mktemp
+  libxcselect.c
+               both recompiled with XC_SELECT_WRITE_ROOT set to a mktemp
                directory, which lowers all four write paths under it
   sandbox.sh   builds the two together, then drives -s and -r against
                the scratch tree and reads the result back off disk
@@ -98,16 +99,21 @@ involved are removed on the way out.  The real /var/select, /var/db and
 it proves: it exercises the code that writes those paths, not the paths
 themselves.
 
-9 rows: -s lays down three links and the data file (and the data file is
+11 rows: -s lays down three links and the data file (and the data file is
 exactly the path plus one trailing newline, the one the reader strips);
-the writer's and the reader's path lists name the same four files, which
-is what keeps a successful -s from being invisible to -p; a second -s
-replaces rather than accumulates; -r clears all four and writes no
-default; a rejected -s writes nothing; and the shipped build still
-refuses both options as a normal user, which is the reason any of this
-is necessary.
+-p reads back the directory -s recorded, which is the row the harness is
+for, since a successful -s that -p could not see would leave the system
+selecting something nobody asked for; both halves name the same four
+system paths; a second -s replaces rather than accumulates; -r clears all
+four and writes no default; an empty sandbox reads as the system default
+rather than the machine's real selection, which is what proves -p is
+really reading the sandbox; a rejected -s writes nothing; and the shipped
+build still refuses both options as a normal user, which is the reason
+any of this is necessary.
 
-Note what it cannot check: libxcselect's copy of those four paths has no
-write-root macro, so -p cannot be pointed at the sandbox (DEVELOPER_DIR
-overrides the selection outright, which is not the same test).  The
-reader/writer agreement is checked by comparing the two lists instead.
+Both halves are recompiled, not just the writer.  libxcselect needed the
+write-root macro to be readable in a sandbox at all -- DEVELOPER_DIR is
+not a substitute, because it overrides the selection outright, so -p
+echoes it back and the run proves nothing.  Recompiling the reader too
+is what turns the read-back from a comparison of two hardcoded strings
+into an actual read of what was written.
