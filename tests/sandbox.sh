@@ -58,6 +58,16 @@ ST=$(mktemp -d "${TMPDIR:-/tmp}/xssandbox.XXXXXX") || exit 2
 trap 'rm -rf "$ST"' EXIT
 SB=$ST/root
 WS=$BIN/xcode-select-sandbox
+real=$REPO/build/$CONFIG/xcode-select
+
+# -p with DEVELOPER_DIR removed from the environment.  It has to be, or
+# every read row in this script is vacuous: DEVELOPER_DIR overrides the
+# selection outright, so -p would echo the caller's own value and agree
+# with the expected one no matter where the four paths point.  That is
+# the same reason the macro exists rather than the environment being
+# leaned on, and it would have made the read-back below pass for the
+# wrong reason on any machine whose CI exports it.
+runp() { env -u DEVELOPER_DIR "$1" -p 2>&1; }
 
 rows=0
 fail=0
@@ -194,7 +204,7 @@ fi
 #    comparison of two hardcoded strings.
 mkroot || exit 2
 "$WS" -s "$TARGET" >/dev/null 2>&1
-got=$("$WS" -p 2>&1)
+got=$(runp "$WS")
 want=$TARGET/Contents/Developer
 if [ "$got" = "$want" ]; then
     ok "print-path reads back what switch wrote"
@@ -270,18 +280,29 @@ else
     bad "reset clears all four and writes nothing" "rc/out: [$out]"
 fi
 
-# 5b. -p on an empty sandbox falls back to the system default rather than
-#     reporting the machine's real selection.  This is what proves the
-#     read-back above is really reading the sandbox: if -p were still
-#     consulting /usr/share, this row would print whatever this machine
-#     has selected and the row after it would be vacuous.
+# 5b. With nothing selected, the sandboxed tool and the shipped one must
+#     report the same thing, and it must not come from the sandbox.  This
+#     is the row that keeps the read-back above honest: it compares against
+#     the shipped build rather than against a hardcoded path, so it says
+#     something on any machine.  An earlier version asserted only that the
+#     output did not start with the sandbox root, which passed on this
+#     host whether or not the macro was applied at all, because there is
+#     no selection in /var/select here to pick up either way.
 mkroot || exit 2
-got=$("$WS" -p 2>&1)
-case $got in
-    "$SB"*) bad "an empty sandbox reads as the system default" "got: [$got]" ;;
-    ""|/*) ok "an empty sandbox reads as the system default" ;;
-    *) bad "an empty sandbox reads as the system default" "got: [$got]" ;;
-esac
+got=$(runp "$WS")
+if [ -x "$real" ]; then
+    want=$(runp "$real")
+    if [ "$got" = "$want" ]; then
+        ok "an empty sandbox agrees with the shipped build's -p"
+    else
+        bad "an empty sandbox agrees with the shipped build's -p" \
+            "sandbox: [$got]" "shipped: [$want]"
+    fi
+else
+    # No shipped build to compare against.  Say so rather than passing a
+    # weaker assertion: this row is only worth anything as a comparison.
+    say "note  build/$CONFIG/xcode-select absent; empty-sandbox -p not compared"
+fi
 
 # 6. -s refuses a path that is not a developer directory, and refuses it
 #    before writing: the sandbox is untouched by a rejected switch.
@@ -325,7 +346,6 @@ fi
 # 8. The gate is real: the shipped build still refuses, as a normal user,
 #    and says so the way Apple does.  This is the whole reason the
 #    sandbox exists, so it is checked rather than assumed.
-real=$REPO/build/$CONFIG/xcode-select
 if [ -x "$real" ]; then
     got=$("$real" -s "$TARGET" 2>&1)
     case $got in

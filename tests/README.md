@@ -10,9 +10,19 @@ Current results (default fixtures, Apple macOS build):
   xsmatrix.sh    30/30  /usr/bin/xcode-select vs build/release/xcode-select
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
+  sandbox.sh     11/11  -s and -r against a scratch tree, read back off disk
   xcrunmatrix.sh 142/142  xcrun_main, Apple xcrun vs build/release/libxcrun.dylib,
               every case matching Apple's transcript; run via
               `make -C tests matrix`, not check
+
+The first four are `make -C tests check`; the last is `make -C tests
+matrix`, and `make -C tests test` runs both.  sandbox.sh is in check even
+though it is the one harness that compiles rather than diffs: it needs
+the same SDK and CC the products were built with, which `check: all` has
+already established, and it takes about 0.7s.  It was separate for a
+while, which meant the only harness proving the -s/-p contract, and the
+only one checking the root gate is real, was not run by the default
+target.
 
 Products and drivers
 --------------------
@@ -105,11 +115,26 @@ exactly the path plus one trailing newline, the one the reader strips);
 for, since a successful -s that -p could not see would leave the system
 selecting something nobody asked for; both halves name the same four
 system paths; a second -s replaces rather than accumulates; -r clears all
-four and writes no default; an empty sandbox reads as the system default
-rather than the machine's real selection, which is what proves -p is
-really reading the sandbox; a rejected -s writes nothing; and the shipped
-build still refuses both options as a normal user, which is the reason
-any of this is necessary.
+four and writes no default; an empty sandbox's -p agrees with the shipped
+build's -p; a rejected -s writes nothing; and the shipped build still
+refuses both options as a normal user, which is the reason any of this
+is necessary.
+
+That empty-sandbox row is a comparison against the shipped binary rather
+than a hardcoded path, which is what makes it worth anything: on a host
+with no selection in /var/select, an earlier version that only asserted
+"the output does not start with the sandbox root" passed whether or not
+the macro was applied, because the reader had nothing to pick up either
+way.  Pointing the reader's fallback at a bogus directory makes the
+comparison fail, which is how it was checked.
+
+Every -p call in the script goes through runp, which removes DEVELOPER_DIR
+from the environment first.  It has to: DEVELOPER_DIR overrides the
+selection outright, so -p would echo the caller's own value and agree
+with the expected one regardless of where the four paths point.  That
+would have made the read-back pass for the wrong reason on any machine
+whose CI exports it -- the same reason the macro exists rather than the
+environment being leaned on.
 
 Both halves are recompiled, not just the writer.  libxcselect needed the
 write-root macro to be readable in a sandbox at all -- DEVELOPER_DIR is

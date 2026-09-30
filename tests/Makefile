@@ -43,24 +43,38 @@ $(BUILD_DIR)/xcrundrive: xcrundrive.c
 # account; set XS_FIX if your fixtures live somewhere other than
 # /tmp/dt/xs.  ivkmatrix.sh and xcrunmatrix.sh run xcrun shim-style
 # invocations and need bash; the other two are plain sh.
+#
+# sandbox.sh is in here too, and used to be a separate target on the
+# grounds that it is the one harness that is not a plain differential
+# script: it compiles a second xcode-select and libxcselect with
+# XC_SELECT_WRITE_ROOT lowered into a scratch tree and links
+# tests/rootstub.c's geteuid().  Both of those reasons turn out to be
+# already covered -- all depends on the products, so the SDK and CC are
+# known good by the time any target runs -- and it takes about 0.7s.
+# Leaving it out of the default gate meant the only harness that proves
+# the -s/-p contract, and the only one that checks the root gate is real,
+# was not run by `make check`.
 check: all
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} sh xsmatrix.sh
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} sh libxsmatrix.sh
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} bash ivkmatrix.sh
+	XS_FIX=$${XS_FIX:-/tmp/dt/xs} sh sandbox.sh
 
 # The wide Apple-vs-ours surface.  Not part of check: it is a per-argument
-# sweep, and it needs both a full Xcode and the command line tools.  Every
-# case in it is compared against Apple's own transcript.  Needs bash.
+# sweep of all 142 cases, and it needs both a full Xcode and the command
+# line tools.  Every case in it is compared against Apple's own
+# transcript.  Needs bash.
 matrix: all
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} bash xcrunmatrix.sh
 
-# The write side, -s and -r, against a sandbox.  Also not part of check:
-# it compiles a second xcode-select and libxcselect with
-# XC_SELECT_WRITE_ROOT lowered into a scratch tree and links
-# tests/rootstub.c's geteuid(), so it needs the SDK and CC the products
-# were built with, and it is the one harness here that is not a plain
-# differential script.
+# Everything, for when a run is meant to be exhaustive.  Same caveat as
+# matrix: needs a full Xcode and the command line tools, not just an SDK.
+test: check matrix
+
+# Just the write side, if that is all that changed.  Kept as its own
+# target so a write-side edit can be re-run without the read-side sweep;
+# check runs it too.
 sandbox: all
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} sh sandbox.sh
 
-.PHONY: all check matrix sandbox
+.PHONY: all check matrix test sandbox
