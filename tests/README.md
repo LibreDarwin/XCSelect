@@ -11,7 +11,7 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 170/170  xcrun_main, Apple xcrun vs build/release/libxcrun.dylib,
+  xcrunmatrix.sh 178/178  xcrun_main, Apple xcrun vs build/release/libxcrun.dylib,
               every case matching Apple's transcript; run via
               `make -C tests matrix`, not check
 
@@ -62,10 +62,25 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The wider xcrunmatrix.sh (170 rows, `make -C tests matrix`) matches
-Apple on all 170, on both the Xcode.app and the CommandLineTools
+The wider xcrunmatrix.sh (178 rows, `make -C tests matrix`) matches
+Apple on all 178, on both the Xcode.app and the CommandLineTools
 layouts.  The three check suites pass 100%.  Getting there took three
 things worth knowing, since each is easy to get backwards:
+
+  * Coverage is the reason the score is believable.  --help and --run
+    had no cases at all, --toolchain had one, and every -l/--log case
+    paired it with something other than --run, which is where --log
+    actually prints.  A toolchain name that is not installed is
+    answered by Apple with the *default* toolchain rather than with the
+    path the requested name would have occupied, and --log has to write
+    to stderr, because stdout is block-buffered when it is not a
+    terminal and the execve that follows would discard it.  Both were
+    wrong here and both were invisible at 142/142.
+
+  * `make -C tests matrix` builds the products first.  The drivers are
+    dlopening libxcselect and libxcrun by path, so a stale library
+    would otherwise be measured silently -- which is how a fixed --log
+    line still read as missing until that was fixed.
 
   * Apple re-execs xcodebuild for a named SDK it cannot place, and its
     own stderr about that carries a timestamped result bundle path, so

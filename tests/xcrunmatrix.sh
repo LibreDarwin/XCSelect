@@ -68,6 +68,14 @@ CASES=(
   "--toolchain XcodeDefault -f clang"
   "--toolchain XcodeDefault --run /usr/bin/true"
   "--toolchain bogusfoo --show-sdk-path"
+  # ...and the two that Apple answers with the default toolchain rather
+  # than with the name that was asked for.  --log's line is lost to stdio
+  # buffering if it is written to stdout and then execve'd over, so these
+  # two only pass when it goes to stderr.
+  "--toolchain bogusfoo --show-toolchain-path"
+  "--toolchain bogusfoo --find clang"
+  "--log --run /usr/bin/true"
+  "-l -r /usr/bin/true"
 
   "--sdk macosx --print-sdk" "--log" "--no-cache --find clang"
 

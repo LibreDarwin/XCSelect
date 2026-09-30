@@ -289,23 +289,6 @@ static int test_sdk_authenticity(const char *path)
 }
 
 /**
- * @func logging_printf -- Print output to fp in logging mode.
- * @arg fp - pointer to file (file, stderr, or stdio)
- * @arg str - string to print
- * @arg ... - additional arguments used
- */
-static void logging_printf(FILE *fp, const char *str, ...)
-{
-	va_list args;
-
-	if (logging_mode == 1) {
-		va_start(args, str);
-		vfprintf(fp, str, args);
-		va_end(args);
-	}
-}
-
-/**
  * @func usage -- Print helpful information about this program.
  * @arg status - what to exit with: 0 when the help was all that was asked
  * for, EX_USAGE when it is the answer to being used wrongly
@@ -672,18 +655,26 @@ static char *default_toolchain_name(void)
  * @arg name - name of the toolchain
  * @return: absolute path of toolchain
  *
- * A toolchain that is not installed is still reported at the path it would
- * occupy.  The Command Line Tools ship no Toolchains directory at all, and
- * xcrun --show-toolchain-path answers
- * <dev>/Toolchains/XcodeDefault.xctoolchain there anyway; a name that
- * cannot be resolved does not fail either, since the answer only ever goes
- * into a PATH, where a directory that is not there contributes nothing.
+ * A name that is not installed is answered with the *default* toolchain,
+ * not with the path the requested name would have occupied.  Apple does
+ * this for both of the things the path is used for: with a full Xcode,
+ * `xcrun --toolchain bogusfoo --show-toolchain-path` reports
+ * <dev>/Toolchains/XcodeDefault.xctoolchain, and `--toolchain bogusfoo
+ * --find clang` then finds clang in that toolchain's usr/bin rather
+ * than giving up and falling through to the caller's PATH.  Under the
+ * Command Line Tools, which have no Toolchains directory at all, the
+ * default toolchain's path is still synthesized rather than refused --
+ * it only ever goes into a PATH, where a directory that is not there
+ * contributes nothing -- and the developer dir's own usr/bin answers
+ * the find anyway.
+ *
  * An installed toolchain is preferred, so a directory that happens to be
  * there with the older suffix is found rather than guessed at.
  */
 static char *get_toolchain_path(const char *name)
 {
 	char *path = NULL;
+	char *dflt;
 	size_t e;
 	char buf[PATH_MAX];
 
@@ -695,6 +686,23 @@ static char *get_toolchain_path(const char *name)
 	/* Apple's <name>.xctoolchain first, then the older <name>.toolchain. */
 	if ((path = xt_find_toolchain(developer_dir, name)) != NULL)
 		return path;
+
+	/*
+	 * Not installed, so the default toolchain answers instead.  The
+	 * comparison keeps this from recursing through the same name when
+	 * the default is what was asked for, which is the common case.
+	 */
+	dflt = default_toolchain_name();
+	if (dflt != NULL && strcmp(dflt, name) != 0) {
+		if ((path = xt_find_toolchain(developer_dir, dflt)) == NULL) {
+			snprintf(buf, sizeof(buf), "%s/Toolchains/%s%s",
+			    developer_dir, dflt, toolchain_exts[0]);
+			path = strdup(buf);
+		}
+		free(dflt);
+		return path;
+	}
+	free(dflt);
 
 	for (e = 0; toolchain_exts[e] != NULL; e++) {
 		snprintf(buf, sizeof(buf), "%s/Toolchains/%s%s",
@@ -1663,11 +1671,30 @@ static int call_command(const char *cmd, int argc, char *argv[])
 		return -1;
 	}
 
+	/*
+	 * --log reports the invocation the way Apple does: as the env
+	 * command it actually is, since that is the process being replaced.
+	 *
+	 * It has to go to stderr.  stdout is block-buffered whenever it is
+	 * not a terminal, and execve below replaces this process without
+	 * flushing, so a line written there is discarded -- which is why
+	 * `xcrun --log --run true | cat` used to print nothing at all while
+	 * the same command on a terminal appeared to work.
+	 *
+	 * SDKROOT is read back out of the environment about to be exec'd
+	 * rather than recomputed, so the line cannot describe a different
+	 * SDK from the one the tool will see.
+	 */
 	if (logging_mode == 1) {
-		logging_printf(stdout, "xcrun: info: invoking command:\n\t\"%s", cmd);
+		fprintf(stderr, "env");
+		for (i = 0; envp[i] != NULL; i++) {
+			if (strncmp(envp[i], "SDKROOT=", 8) == 0)
+				fprintf(stderr, " %s", envp[i]);
+		}
+		fprintf(stderr, " %s", cmd);
 		for (i = 1; i < argc; i++)
-			logging_printf(stdout, " %s", argv[i]);
-		logging_printf(stdout, "\"\n");
+			fprintf(stderr, " %s", argv[i]);
+		fprintf(stderr, "\n");
 	}
 
 	return execve(cmd, argv, envp);

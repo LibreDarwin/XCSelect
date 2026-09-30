@@ -25,7 +25,23 @@ CFLAGS := $(OPT) -std=c11 -D_DARWIN_C_SOURCE -isysroot "$(SDK)" -Wall -Wextra
 
 DRIVERS := $(BUILD_DIR)/ivk $(BUILD_DIR)/libxstest $(BUILD_DIR)/xcrundrive
 
-all: $(DRIVERS)
+# The matrices dlopen libxcselect and libxcrun *by path*, so those two have
+# to be current before any of them runs -- and the rule for the drivers
+# above is not enough on its own, because it only builds the drivers.  A
+# stale library is measured silently, which is the worst failure mode a
+# differential harness has: it cannot tell you it is looking at the wrong
+# build, it just disagrees with you about the code you are looking at.
+# That is not hypothetical -- a fixed --log line still read as missing from
+# the matrix until this was added, because the library had not been
+# rebuilt since the edit.
+#
+# Recursing is cheap because the top level is incremental, and it keeps the
+# build flags from being restated here where they would drift.
+.PHONY: products
+products:
+	$(MAKE) -C .. CONFIG=$(CONFIG)
+
+all: $(DRIVERS) products
 
 $(BUILD_DIR)/ivk: ivk.c
 	@mkdir -p $(BUILD_DIR)
@@ -50,7 +66,9 @@ $(BUILD_DIR)/xcrundrive: xcrundrive.c
 # XC_SELECT_WRITE_ROOT lowered into a scratch tree and links
 # tests/rootstub.c's geteuid().  Both of those reasons turn out to be
 # already covered -- all depends on the products, so the SDK and CC are
-# known good by the time any target runs -- and it takes about 0.7s.
+# known good by the time any target runs, and the libraries the matrices
+# measure are rebuilt rather than whatever was there last -- and it takes
+# about 0.7s.
 # Leaving it out of the default gate meant the only harness that proves
 # the -s/-p contract, and the only one that checks the root gate is real,
 # was not run by `make check`.
@@ -61,7 +79,7 @@ check: all
 	XS_FIX=$${XS_FIX:-/tmp/dt/xs} sh sandbox.sh
 
 # The wide Apple-vs-ours surface.  Not part of check: it is a per-argument
-# sweep of all 170 cases, and it needs both a full Xcode and the command
+# sweep of all 178 cases, and it needs both a full Xcode and the command
 # line tools.  Every case in it is compared against Apple's own
 # transcript.  Needs bash.
 matrix: all
