@@ -213,34 +213,30 @@ else
         "got: [$got]" "want: [$want]"
 fi
 
-# 3b. The two lists are still compared directly, because the read-back
-#     above would pass even if both sides moved to a fifth path together:
-#     the read-back proves the halves agree, not that they are the paths
-#     the system uses.  Only this does that.
-#     the paths the system uses.  Only this does that.
-#
-# Each side's four paths are read out of its own source -- the three in
-# dev_dir_links and the one behind the data-file macro -- and reduced to
-# basenames, since a macro only prepends a root and renames nothing.  The
-# system paths are spelled out here rather than taken from either source,
-# so a path edited on one side and copied to the other is caught instead
-# of being confirmed twice.
-paths_of() {
-    sed -n '/dev_dir_links\[\] *= *{/,/};/p' "$1" |
-        sed -n 's/.*WRITE_ROOT *"\([^"]*\)".*/\1/p'
-    grep -A1 '^#define *\(XC_SELECT_DEV_DIR_FILE\|XCSELECT_DEV_DIR_FILE\)' "$1" |
-        sed -n 's/.*WRITE_ROOT *"\([^"]*\)".*/\1/p'
-}
-basenames() { while read -r p; do basename "$p"; done | tr '\n' ' '; }
-w=$(paths_of "$REPO/src/xcode-select/xcode-select.c" | basenames)
-r=$(paths_of "$REPO/src/libxcselect/libxcselect.c" | basenames)
-sys="developer_dir xcode_select_link xcode_dir_link xcode_dir_path "
-if [ "$w" = "$r" ] && [ -n "$w" ] && [ "$w" = "$sys" ]; then
-    ok "both halves name the same four system paths"
-else
-    bad "both halves name the same four system paths" \
-        "writer: [$w]" "reader: [$r]" "system: [$sys]"
-fi
+# 3b. Each of the four paths is exercised on its own, with the other three
+#      removed.  The read-back above cannot do this: dev_dir_links is
+#      consulted in order and the first one that resolves wins, so a
+#      renamed third link is masked by the first, and even with the first
+#      two gone it is masked by the data file.  Only taking the later paths
+#      away as well puts each one in reach.  This is what anchors the four
+#      names to the system paths without reading either source file -- it
+#      asserts what the compiled code does rather than what its text says,
+#      so it cannot be broken by moving a macro onto another line.
+i=0
+for keep in "$LINK1" "$LINK2" "$LINK3" "$DATA"; do
+    i=$((i + 1))
+    mkroot || exit 2
+    "$WS" -s "$TARGET" >/dev/null 2>&1
+    for p in "$LINK1" "$LINK2" "$LINK3" "$DATA"; do
+        [ "$p" = "$keep" ] || rm -f "$p"
+    done
+    got=$(runp "$WS")
+    if [ "$got" = "$TARGET/Contents/Developer" ]; then
+        ok "-p finds it with only $(basename "$keep") left ($i/4)"
+    else
+        bad "-p finds it with only $(basename "$keep") left ($i/4)" "got: [$got]"
+    fi
+done
 
 # 4. A second -s replaces the first, and does not accumulate: the links
 #    are unlinked first, so a stale link pointing at the old directory is

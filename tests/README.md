@@ -10,7 +10,7 @@ Current results (default fixtures, Apple macOS build):
   xsmatrix.sh    30/30  /usr/bin/xcode-select vs build/release/xcode-select
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
-  sandbox.sh     11/11  -s and -r against a scratch tree, read back off disk
+  sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
   xcrunmatrix.sh 142/142  xcrun_main, Apple xcrun vs build/release/libxcrun.dylib,
               every case matching Apple's transcript; run via
               `make -C tests matrix`, not check
@@ -109,16 +109,29 @@ involved are removed on the way out.  The real /var/select, /var/db and
 it proves: it exercises the code that writes those paths, not the paths
 themselves.
 
-11 rows: -s lays down three links and the data file (and the data file is
+14 rows: -s lays down three links and the data file (and the data file is
 exactly the path plus one trailing newline, the one the reader strips);
 -p reads back the directory -s recorded, which is the row the harness is
 for, since a successful -s that -p could not see would leave the system
-selecting something nobody asked for; both halves name the same four
-system paths; a second -s replaces rather than accumulates; -r clears all
-four and writes no default; an empty sandbox's -p agrees with the shipped
-build's -p; a rejected -s writes nothing; and the shipped build still
-refuses both options as a normal user, which is the reason any of this
-is necessary.
+selecting something nobody asked for; each of the four paths in turn,
+with the other three deleted, still yields the selection; a second -s
+replaces rather than accumulates; -r clears all four and writes no
+default; an empty sandbox's -p agrees with the shipped build's -p; a
+rejected -s writes nothing; and the shipped build still refuses both
+options as a normal user, which is the reason any of this is necessary.
+
+Those four single-path rows are what tie the four names to the system
+paths, and they do it by exercising the compiled code rather than by
+reading either source file.  An earlier version compared the writer's and
+the reader's path lists by scraping the sources with sed and grep, which
+is the kind of check that breaks when a macro moves onto another line --
+it did, twice -- and it could not see past the reader's fallback order
+anyway.  The single-path rows are stronger: dev_dir_links is consulted in
+order and the first one that resolves wins, so the plain read-back cannot
+notice a renamed third link, because the first one still answers.  Only
+deleting the later paths puts each one in reach.  Renaming a path in one
+half, in both halves, in the first link and in the data file are all
+caught, and none of it reads the source.
 
 That empty-sandbox row is a comparison against the shipped binary rather
 than a hardcoded path, which is what makes it worth anything: on a host
