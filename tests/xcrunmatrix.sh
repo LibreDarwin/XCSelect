@@ -21,6 +21,7 @@ FIX=${XS_FIX:-/tmp/dt/xs}
 FIXR=$(CDPATH= cd -- "$FIX" && pwd -P)
 LIB=$REPO/build/release/libxcrun.dylib
 DRIVE=$REPO/build/test/xcrundrive
+XCRUN=$REPO/build/release/xcrun
 X=/Applications/Xcode.app/Contents/Developer
 C=/Library/Developer/CommandLineTools
 ST=$(mktemp -d "${TMPDIR:-/tmp}/xcrunmatrix.XXXXXX") || exit 2
@@ -103,27 +104,91 @@ CASES=(
 )
 
 total=0; diffs=0
+
+# One comparison, so the pass/fail rule and the label width live in one
+# place rather than in every section that needs them.  $1 is the label to
+# print, $2 and $3 are the two runners, and the rest is the command; the
+# sections below differ only in which pair of runners they name, which is
+# the whole point of naming them here.
+cmp() {
+  local label=$1 arun=$2 orun=$3
+  shift 3
+  "$arun" "$@" >"$ST/a.out" 2>"$ST/a.err"; local ar=$?
+  "$orun" "$@" >"$ST/o.out" 2>"$ST/o.err"; local or_=$?
+  norm "$ST/a.out" > "$ST/a.out.n"; norm "$ST/o.out" > "$ST/o.out.n"
+  norm "$ST/a.err" > "$ST/a.err.n"; norm "$ST/o.err" > "$ST/o.err.n"
+  total=$((total+1))
+  if [ "$ar" = "$or_" ] && diff -q "$ST/a.out.n" "$ST/o.out.n" >/dev/null \
+     && diff -q "$ST/a.err.n" "$ST/o.err.n" >/dev/null; then
+    printf "  ok    %-46s rc %s\n" "$label" "$ar"
+  else
+    diffs=$((diffs+1))
+    printf "  DIFF  %-46s rc %s/%s\n" "$label" "$ar" "$or_"
+    diff "$ST/a.out.n" "$ST/o.out.n" | rtk sed 's/^/          out| /' | head -6
+    diff "$ST/a.err.n" "$ST/o.err.n" | rtk sed 's/^/          err| /' | head -8
+  fi
+}
+
+# Through the driver, into libxcrun, with a developer directory libxcselect
+# has already vouched for -- which is the only way libxcrun is called in
+# anger, and why $X and $C are the only directories it is given below.
+run_lib() { DEVELOPER_DIR=$devd /usr/bin/xcrun "$@"; }
+run_ours_lib() { DRIVE_DEV=$devd DRIVE_LIB=$LIB "$DRIVE" "$@"; }
+
 for d in "$X" "$C"; do
   echo "=== $(basename "$d") ==="
   for c in "${CASES[@]}"; do
     # shellcheck disable=SC2086
     set -- $c
+    devd=$d
     # warm plist-sensitive Apple calls; the second run is the steady state
-    DEVELOPER_DIR=$d /usr/bin/xcrun "$@" >/dev/null 2>&1
-    DEVELOPER_DIR=$d /usr/bin/xcrun "$@" >"$ST/a.out" 2>"$ST/a.err"; ar=$?
-    DRIVE_DEV=$d DRIVE_LIB=$LIB "$DRIVE" "$@" >"$ST/o.out" 2>"$ST/o.err"; or_=$?
-    norm "$ST/a.out" > "$ST/a.out.n"; norm "$ST/o.out" > "$ST/o.out.n"
-    norm "$ST/a.err" > "$ST/a.err.n"; norm "$ST/o.err" > "$ST/o.err.n"
-    total=$((total+1))
-    if [ "$ar" = "$or_" ] && diff -q "$ST/a.out.n" "$ST/o.out.n" >/dev/null \
-       && diff -q "$ST/a.err.n" "$ST/o.err.n" >/dev/null; then
-      printf "  ok    %s\n" "$c"
-    else
-      diffs=$((diffs+1))
-      printf "  DIFF  %-42s rc %d/%d\n" "$c" "$ar" "$or_"
-      diff "$ST/a.out.n" "$ST/o.out.n" | rtk sed 's/^/          out| /' | head -6
-      diff "$ST/a.err.n" "$ST/o.err.n" | rtk sed 's/^/          err| /' | head -8
-    fi
+    run_lib "$@" >/dev/null 2>&1
+    cmp "$c" run_lib run_ours_lib "$@"
   done
 done
+
+# The rows above reach libxcrun directly, so they cannot see a developer
+# directory being rejected: that check is in libxcselect, one layer up, and
+# the only thing that exercises it is the shipped xcrun binary.  Nothing
+# compared that binary to Apple's before, which is a real gap rather than a
+# hypothetical one -- a stale DEVELOPER_DIR is an ordinary event (an
+# unmounted volume, a renamed Xcode, an environment baked at image-build
+# time) and it is answered with a specific message and a specific exit
+# status, which scripts do branch on.
+#
+# These pass today.  They are here so that they say so, and so that a change
+# to that message cannot go unnoticed the way the two differences in the
+# previous two commits did.
+#
+# The selection-sourced form of the same complaint -- "active developer"
+# rather than "DEVELOPER_DIR", when the value came from xcode-select -s
+# rather than the environment -- is not here, because reaching it means
+# moving the real selection, which none of these tests do.
+echo "=== shipped xcrun, bad DEVELOPER_DIR ==="
+run_bin() { DEVELOPER_DIR=$devd /usr/bin/xcrun "$@"; }
+run_ours_bin() { DEVELOPER_DIR=$devd "$XCRUN" "$@"; }
+for c in "--version" "--show-sdk-path" "--find clang" "--help"; do
+  # shellcheck disable=SC2086
+  set -- $c
+  for devd in /nonexistent/DD /tmp; do
+    cmp "DEVELOPER_DIR=$devd $c" run_bin run_ours_bin "$@"
+  done
+done
+
+echo "=== shipped xcrun, DEVELOPER_DIR empty or unset ==="
+run_bin_n() { env -u DEVELOPER_DIR /usr/bin/xcrun "$@"; }
+run_ours_bin_n() { env -u DEVELOPER_DIR "$XCRUN" "$@"; }
+for c in "--version" "--show-sdk-path" "--find clang"; do
+  # shellcheck disable=SC2086
+  set -- $c
+  # An empty DEVELOPER_DIR is not a path that happens not to exist, it is
+  # no setting at all, and both sides have to fall through to the selection.
+  devd=''
+  cmp "DEVELOPER_DIR='' $c" run_bin run_ours_bin "$@"
+  # ...and since the real selection is never touched, unset and empty are
+  # expected to be the same answer rather than a coincidence.
+  cmp "DEVELOPER_DIR unset $c" run_bin_n run_ours_bin_n "$@"
+done
+
 echo "=== $((total-diffs))/$total match ==="
+[ "$diffs" -eq 0 ]

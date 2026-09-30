@@ -11,7 +11,10 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 178/178  xcrun_main, Apple xcrun vs build/release/libxcrun.dylib,
+  xcrunmatrix.sh 192/192  the wide argument sweep plus the shipped
+              xcrun binary's DEVELOPER_DIR edges: Apple xcrun vs
+              build/release/libxcrun.dylib through the driver, and vs
+              build/release/xcrun where the dev dir is the variable;
               every case matching Apple's transcript; run via
               `make -C tests matrix`, not check
 
@@ -62,8 +65,8 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The wider xcrunmatrix.sh (178 rows, `make -C tests matrix`) matches
-Apple on all 178, on both the Xcode.app and the CommandLineTools
+The wider xcrunmatrix.sh (192 rows, `make -C tests matrix`) matches
+Apple on all 192, on both the Xcode.app and the CommandLineTools
 layouts.  The three check suites pass 100%.  Getting there took three
 things worth knowing, since each is easy to get backwards:
 
@@ -81,6 +84,17 @@ things worth knowing, since each is easy to get backwards:
     dlopening libxcselect and libxcrun by path, so a stale library
     would otherwise be measured silently -- which is how a fixed --log
     line still read as missing until that was fixed.
+
+  * A bad `DEVELOPER_DIR` is rejected by libxcselect, not libxcrun, so
+    no row that reaches libxcrun through the driver can see it.  That
+    leaves the shipped `xcrun` binary, which nothing compared to
+    Apple's at all until the last section of xcrunmatrix.sh.  A stale
+    `DEVELOPER_DIR` is an ordinary event -- unmounted volume, renamed
+    Xcode, an environment baked at image-build time -- and the answer
+    is a specific message and exit status that scripts branch on, so
+    those rows exist to keep it that way.  The selection-sourced form
+    of the same error ("active developer" rather than "DEVELOPER_DIR")
+    is still untested: reaching it means moving the real selection.
 
   * Apple re-execs xcodebuild for a named SDK it cannot place, and its
     own stderr about that carries a timestamped result bundle path, so
