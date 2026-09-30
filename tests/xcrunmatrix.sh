@@ -33,7 +33,7 @@ norm() { sed -E \
   -e "s#$FIXR#CWD#g" -e "s#$FIX#CWD#g" "$1"; }
 
 CASES=(
-  "--version" "-h"
+  "--version" "-h" "--help"
   "--sdk macosx --show-sdk-path" "--sdk macosx15 --show-sdk-path"
   "--sdk macosx15.4 --show-sdk-path" "--sdk macosx26 --show-sdk-path"
   "--sdk macosx26.5 --show-sdk-path" "--sdk macosx26.0 --show-sdk-path"
@@ -51,6 +51,24 @@ CASES=(
   "--find sub/dir/tool" "--find /" "--find a/" "--find usr/bin/clang"
   "--find /usr/bin/" "--sdk bogusfoo --find /usr/bin/clang"
   "-f /usr/bin/clang" "-f ./relative-tool" "-r /usr/bin/true"
+  "--run /usr/bin/true" "--run /usr/bin/false" "--run nosuchtool-xyz"
+
+  # --toolchain, and --log outside the verbose family.  These two flags
+  # were the only ones in Apple's option list with almost no coverage here
+  # -- --help and --run had none at all -- which is how a difference in
+  # both of them went unnoticed: a toolchain name that is not installed
+  # is answered by Apple with the default toolchain, and --run is where
+  # --log actually has something to print.  Both are now in the matrix;
+  # the cases that catch those two differences were added with the fixes.
+  "-l --find clang" "-l --show-sdk-version" "-l --show-sdk-build-version"
+  "--log --show-sdk-build-version"
+  "--toolchain XcodeDefault --show-toolchain-path"
+  "--toolchain XcodeDefault --find clang"
+  "--toolchain XcodeDefault.xctoolchain --find clang"
+  "--toolchain XcodeDefault -f clang"
+  "--toolchain XcodeDefault --run /usr/bin/true"
+  "--toolchain bogusfoo --show-sdk-path"
+
   "--sdk macosx --print-sdk" "--log" "--no-cache --find clang"
 
   # Verbose trace: manpath/environment/tool keys.  The "lookup resolved"

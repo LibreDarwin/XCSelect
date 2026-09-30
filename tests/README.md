@@ -11,7 +11,7 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 142/142  xcrun_main, Apple xcrun vs build/release/libxcrun.dylib,
+  xcrunmatrix.sh 170/170  xcrun_main, Apple xcrun vs build/release/libxcrun.dylib,
               every case matching Apple's transcript; run via
               `make -C tests matrix`, not check
 
@@ -62,8 +62,8 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The wider xcrunmatrix.sh (142 rows, `make -C tests matrix`) matches
-Apple on all 142, on both the Xcode.app and the CommandLineTools
+The wider xcrunmatrix.sh (170 rows, `make -C tests matrix`) matches
+Apple on all 170, on both the Xcode.app and the CommandLineTools
 layouts.  The three check suites pass 100%.  Getting there took three
 things worth knowing, since each is easy to get backwards:
 
