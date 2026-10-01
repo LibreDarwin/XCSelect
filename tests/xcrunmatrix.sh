@@ -27,10 +27,24 @@ C=/Library/Developer/CommandLineTools
 ST=$(mktemp -d "${TMPDIR:-/tmp}/xcrunmatrix.XXXXXX") || exit 2
 trap 'rm -rf "$ST"' EXIT
 
-norm() { sed -E \
-  -e 's#ResultBundle_[0-9-]+_[0-9-]+\.xcresult#ResultBundle_X.xcresult#g' \
+is_text() { [ "$(LC_ALL=C tr -cd '\000' < "$1" | wc -c | tr -d ' ')" -eq 0 ]; }
+
+# The bundle name is ResultBundle_<date>_<time>-<subsecond>.xcresult, and the
+# subsecond part is what makes two runs of the same command name two
+# different files.  The rule that used to try to hide that read
+# ResultBundle_[0-9-]+_[0-9]+\.xcresult, which cannot match: [0-9-] does
+# not contain _, so the split has to happen at the first _, and then the
+# dashes in the time part stop [0-9]+.  It had never fired.  The rows that
+# depend on it were passing only because both sides happened to land in the
+# same thousandth, which is luck, and adding anything to the harness is
+# enough to change that -- sixteen rows of the 192 were a coin toss.
+norm() {
+  is_text "$1" || { cat "$1"; return; }
+  sed -E \
+  -e 's#ResultBundle_[0-9-]+(_[0-9-]+)*\.xcresult#ResultBundle_X.xcresult#g' \
   -e 's#[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?#TIMESTAMP#g' \
   -e 's#xcodebuild\[[0-9]+:[0-9]+\]#xcodebuild[PID:THR]#g' \
+  -e 's#^.*(Terminated|Killed): [0-9]+.*$#JOB NOTIFICATION#' \
   -e "s#$FIXR#CWD#g" -e "s#$FIX#CWD#g" "$1"; }
 
 CASES=(
@@ -110,11 +124,19 @@ total=0; diffs=0
 # print, $2 and $3 are the two runners, and the rest is the command; the
 # sections below differ only in which pair of runners they name, which is
 # the whole point of naming them here.
+#
+# $CMP_STDIN, when set, names a file that both sides get as their standard
+# input.  It is a file name and not a descriptor because each side has to
+# open it for itself: sharing one descriptor lets the first side consume
+# the bytes and leaves the second reading EOF, which then reads as a
+# difference in the tool rather than in the harness.  Unset, a case gets
+# /dev/null, so no case can inherit this script's own stdin by accident.
 cmp() {
   local label=$1 arun=$2 orun=$3
   shift 3
-  "$arun" "$@" >"$ST/a.out" 2>"$ST/a.err"; local ar=$?
-  "$orun" "$@" >"$ST/o.out" 2>"$ST/o.err"; local or_=$?
+  local inf=${CMP_STDIN:-/dev/null}
+  "$arun" "$@" >"$ST/a.out" 2>"$ST/a.err" <"$inf"; local ar=$?
+  "$orun" "$@" >"$ST/o.out" 2>"$ST/o.err" <"$inf"; local or_=$?
   norm "$ST/a.out" > "$ST/a.out.n"; norm "$ST/o.out" > "$ST/o.out.n"
   norm "$ST/a.err" > "$ST/a.err.n"; norm "$ST/o.err" > "$ST/o.err.n"
   total=$((total+1))
@@ -188,6 +210,83 @@ for c in "--version" "--show-sdk-path" "--find clang"; do
   # ...and since the real selection is never touched, unset and empty are
   # expected to be the same answer rather than a coincidence.
   cmp "DEVELOPER_DIR unset $c" run_bin_n run_ours_bin_n "$@"
+done
+
+# ---------------------------------------------------------------------------
+# What a tool run through --run actually inherits.  --run is the one option
+# that does not answer a question but replaces the process, so everything
+# about the replacement belongs to libxcrun: the environment it hands over,
+# the descriptor the caller piped in, the working directory, the umask, and
+# the status the calling shell ends up with.  None of that had a committed
+# row.  It had all been checked by hand, and by hand is not the same as
+# being covered.
+#
+# These go through the driver, which is the only way to be sure that ours
+# is the libxcrun under test.  build/release/xcrun is the shim the way
+# /usr/bin/xcrun is: it links only libxcselect, which dlopens
+# <developer dir>/usr/lib/libxcrun.dylib.  Pointed at a real Xcode it
+# therefore loads *Apple's* libxcrun, and a row run that way compares
+# Apple's implementation against itself and passes by saying nothing.  The
+# two bad-DEVELOPER_DIR sections below are the exception, and rightly so:
+# that complaint comes from libxcselect, one layer up, and no libxcrun
+# would ever be reached to answer it.
+#
+# Both sides are handed the same environment by construction -- env -i,
+# then the same variables -- so whatever appears in the child's
+# environment is something the tool put there rather than something the
+# shell happened to be carrying.  The driver takes its own two variables
+# out of the environment before calling in, so they are not among them.
+run_lib_p() { env -i PATH=/usr/bin:/bin HOME=/tmp TMPDIR="$ST/tmp" \
+    XSMATRIX_PROBE=probe-42 DEVELOPER_DIR="$devd" /usr/bin/xcrun "$@"; }
+run_ours_lib_p() { env -i PATH=/usr/bin:/bin HOME=/tmp TMPDIR="$ST/tmp" \
+    XSMATRIX_PROBE=probe-42 DEVELOPER_DIR="$devd" \
+    DRIVE_DEV="$devd" DRIVE_LIB="$LIB" "$DRIVE" "$@"; }
+
+# Two inputs: text with no trailing newline, and something sed must not be
+# allowed near.  The second is the reason norm() above checks for NUL.
+printf 'line one\nline two\nno trailing newline' >"$ST/in.text"
+printf 'a\0b\0c\n' >"$ST/in.bin"
+mkdir -p "$ST/tmp" || exit 2
+
+for devd in "$X" "$C"; do
+  echo "=== --run inherits ($(basename "$devd")) ==="
+  # Standard input reaches the tool because nothing intercepts it, and each
+  # side is given the same bytes to read rather than a shared descriptor.
+  CMP_STDIN=$ST/in.text \
+    cmp "stdin: text piped through --run" run_lib_p run_ours_lib_p --run /bin/cat
+  cmp "stdin: nothing piped" run_lib_p run_ours_lib_p --run /bin/cat
+  CMP_STDIN=$ST/in.bin \
+    cmp "stdin: NUL bytes" run_lib_p run_ours_lib_p --run /bin/cat
+  # The tool is replaced, so the status the shell sees is the tool's own --
+  # not a status xcrun decided on its behalf.  A signal is reported as the
+  # shell reports it, 128+signo, which is the case that would catch a
+  # wrapper turning a killed tool into a clean zero.
+  cmp "status: exit 42" run_lib_p run_ours_lib_p --run /bin/sh -c 'exit 42'
+  cmp "status: killed by SIGTERM" run_lib_p run_ours_lib_p \
+    --run /bin/sh -c 'kill -TERM $$'
+  cmp "status: killed by SIGKILL" run_lib_p run_ours_lib_p \
+    --run /bin/sh -c 'kill -KILL $$'
+  # ...and the two things the tool is run in rather than given.
+  cmp "inherited: working directory" run_lib_p run_ours_lib_p --run /bin/pwd
+  cmp "inherited: umask" run_lib_p run_ours_lib_p --run /bin/sh -c umask
+  # The whole environment, sorted, because the order the entries happen to
+  # be built in is not a contract and comparing it would be a row that
+  # fails for no reason.  This is the row that catches a variable xcrun
+  # invented, or one it dropped on the floor.
+  cmp "inherited: whole environment" run_lib_p run_ours_lib_p \
+    --run /bin/sh -c 'env | sort'
+  # ...and the same facts one at a time, so a failure names which variable
+  # rather than making it be diffed out of a list.
+  for v in SDKROOT DEVELOPER_DIR MANPATH PATH HOME XSMATRIX_PROBE; do
+    cmp "inherited: \$$v" run_lib_p run_ours_lib_p \
+      --run /bin/sh -c "printf %s \"\$$v\""
+  done
+  # PATH is never added to by either side: the caller's PATH is the tool's
+  # PATH.  A tool that wanted the developer directory on its PATH would have
+  # to be found there in the first place.
+  cmp "inherited: PATH is not rewritten" run_lib_p run_ours_lib_p \
+    --run /bin/sh -c 'printf %s "$PATH"'
+  unset CMP_STDIN
 done
 
 echo "=== $((total-diffs))/$total match ==="

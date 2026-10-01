@@ -5,6 +5,14 @@
  * see the same DEVELOPER_DIR without touching the real xcode-select
  * state.  Every run is a fresh process and read-only.
  *
+ * DRIVE_DEV and DRIVE_LIB are read and then removed from the environment,
+ * because libxcrun hands the tool it runs the caller's environment with a
+ * few entries replaced, and a tool that inherits them would be given
+ * DRIVE_LIB=<path> on this side and nothing on Apple's -- a difference in
+ * the harness that a row comparing that environment would read as a
+ * difference in the product.  DEVELOPER_DIR is therefore the only thing
+ * that needs setting to make the two environments the same.
+ *
  * Usage: xcrundrive [<args...>]
  *   the arguments are handed to xcrun_main as its argv, verbatim.
  *
@@ -33,6 +41,8 @@ main(int argc, char *argv[])
 		fprintf(stderr, "xcrundrive: DRIVE_LIB is not set\n");
 		return 2;
 	}
+	unsetenv("DRIVE_DEV");
+	unsetenv("DRIVE_LIB");
 	if ((handle = dlopen(lib, RTLD_LAZY | RTLD_LOCAL)) == NULL) {
 		fprintf(stderr, "xcrundrive: dlopen: %s\n", dlerror());
 		return 2;

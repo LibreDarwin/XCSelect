@@ -11,7 +11,7 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 192/192  the wide argument sweep plus the shipped
+  xcrunmatrix.sh 224/224  the wide argument sweep plus the shipped
               xcrun binary's DEVELOPER_DIR edges: Apple xcrun vs
               build/release/libxcrun.dylib through the driver, and vs
               build/release/xcrun where the dev dir is the variable;
@@ -41,6 +41,15 @@ selection; the write paths are sandbox.sh's job.  One shape cannot be a
 row: the case table word-splits its argument column, so an empty
 argument (`-s ''`) is not expressible and is covered by hand.
 
+The --run section of xcrunmatrix.sh covers the other half of what it
+means to replace a process: the environment the tool is handed (all
+thirteen entries of it, sorted, plus the six that matter named one at a
+time so a failure says which), the bytes piped in, the working
+directory, the umask, and the status the shell ends up with for an exit
+code and for a signal.  Both sides get the same starting environment by
+construction -- `env -i` and then the same variables -- so what the row
+compares is what the tool did, not what the shell was carrying.
+
 Products and drivers
 --------------------
 `make` (top-level) puts the products in build/release; `make` in tests/
@@ -58,6 +67,10 @@ puts the three dlopen drivers in build/test:
            calls xcrun_main with the caller's argv, the way the xcrun
            front-end does, so the full argument surface can be diffed
            against Apple's /usr/bin/xcrun without touching real state.
+           DRIVE_DEV and DRIVE_LIB are removed from the environment
+           before the call, because libxcrun hands the tool it runs the
+           caller's environment and a tool would otherwise inherit
+           DRIVE_LIB on this side and nothing on Apple's.
 
 Fixtures (XS_FIX, default /tmp/dt/xs)
 -------------------------------------
