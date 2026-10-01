@@ -32,7 +32,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <getopt.h>
 #include <limits.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -235,78 +234,72 @@ static int clear_developer_path(void)
 int main(int argc, char *argv[])
 {
 	char complaint[PATH_MAX + 32];
-	int ch;
 	char *path = NULL;
 
 	if (argc < 2)
 		usage("no command option given");
 
-	/* -h is answered where it is read, so it needs no flag of its own. */
-	static int version_f, switch_f, printpath_f, install_f, reset_f;
+	/* -h is answered after the whole line has been read, not where it is
+	 * read, so that -h --nonsense complains about the nonsense. */
+	static int help_f, version_f, switch_f, printpath_f, install_f, reset_f;
 	static int manpaths_f;
-	version_f = switch_f = printpath_f = install_f = reset_f = 0;
+	help_f = version_f = switch_f = printpath_f = install_f = reset_f = 0;
 	manpaths_f = 0;
 
-	static struct option options[] = {
-		{ "help", no_argument, 0, 'h' },
-		{ "version", no_argument, 0, 'v' },
-		{ "switch", required_argument, 0, 's' },
-		{ "print-path", no_argument, 0, 'p' },
-		{ "install", no_argument, 0, 'I' },
-		{ "reset", no_argument, 0, 'r' },
-		{ "show-manpaths", no_argument, 0, 'm' },
-		{ NULL, 0, 0, 0 }
-	};
-
 	/*
-	 * A leading colon leaves the complaining to us, which is what decides
-	 * how it is worded: a missing argument is not an argument that is not
-	 * there, and the two are told apart here rather than by getopt.
+	 * The shipped tool takes whole tokens or nothing: an option is one of
+	 * a fixed set spelled exactly as it appears in the help, with no
+	 * clustering (-pv), no end-of-options marker (--), no abbreviation
+	 * (--print for --print-path) and no attached or = argument
+	 * (-s/path, --switch=/path).  Each of those is an invalid argument
+	 * that names the token as it was written.
 	 *
-	 * --install is a long option only: -I is not a switch, and asking
-	 * for it is an invalid argument the same as any other.
+	 * getopt cannot be asked for that.  getopt_long_only clusters
+	 * single-letter options, accepts any unique long-option prefix, and
+	 * reads a bare -- as the end of the options -- and worse, it reads
+	 * -i as an abbreviation of --install, which the shipped tool refuses.
+	 * So the scan is spelled out instead of configured.
+	 *
+	 * It walks left to right and stops at the first token it does not
+	 * recognise, which is what decides whose name lands in the complaint
+	 * when a command line has more than one thing wrong with it:
+	 * -p x --nonsense names x, not --nonsense.  --install and
+	 * --show-manpaths are long options only for the same reason -I is
+	 * not a switch, and a missing argument is told apart from an
+	 * argument that is not there.
 	 */
-	while ((ch = getopt_long_only(argc, argv, ":hvprs:", options,
-	    NULL)) != (-1)) {
-		switch (ch) {
-			case 'h':
-				usage(NULL);
-				break;
-			case 'v':
-				version_f = 1;
-				break;
-			case 's':
-				switch_f = 1;
-				path = optarg;
-				break;
-			case 'p':
-				printpath_f = 1;
-				break;
-			case 'I':
-				install_f = 1;
-				break;
-			case 'r':
-				reset_f = 1;
-				break;
-			case 'm':
-				manpaths_f = 1;
-				break;
-			case ':':
-				snprintf(complaint, sizeof(complaint),
-				    "missing argument to '%s'", argv[optind - 1]);
-				usage(complaint);
-			default:
-				snprintf(complaint, sizeof(complaint),
-				    "invalid argument '%s'", argv[optind - 1]);
-				usage(complaint);
-		}
-	}
+	for (int i = 1; i < argc; i++) {
+		const char *arg = argv[i];
 
-	/* Anything left over is an operand, and this tool takes none. */
-	if (optind < argc) {
-		snprintf(complaint, sizeof(complaint), "invalid argument '%s'",
-		    argv[optind]);
-		usage(complaint);
+		if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
+			help_f = 1;
+		} else if (strcmp(arg, "-v") == 0 ||
+		    strcmp(arg, "--version") == 0) {
+			version_f = 1;
+		} else if (strcmp(arg, "-p") == 0 ||
+		    strcmp(arg, "--print-path") == 0) {
+			printpath_f = 1;
+		} else if (strcmp(arg, "-s") == 0 ||
+		    strcmp(arg, "--switch") == 0) {
+			if (i + 1 == argc) {
+				snprintf(complaint, sizeof(complaint),
+				    "missing argument to '%s'", arg);
+				usage(complaint);
+			}
+			switch_f = 1;
+			path = argv[++i];
+		} else if (strcmp(arg, "--install") == 0) {
+			install_f = 1;
+		} else if (strcmp(arg, "-r") == 0 ||
+		    strcmp(arg, "--reset") == 0) {
+			reset_f = 1;
+		} else if (strcmp(arg, "--show-manpaths") == 0) {
+			manpaths_f = 1;
+		} else {
+			snprintf(complaint, sizeof(complaint),
+			    "invalid argument '%s'", arg);
+			usage(complaint);
+		}
 	}
 
 	/*
@@ -314,6 +307,11 @@ int main(int argc, char *argv[])
 	 * asking for two -- -p -p prints the path once, and -s a -s b
 	 * switches to the last one given -- so what is counted is how many
 	 * different actions were named, not how many options there were.
+	 *
+	 * -h is not one of the counted actions, but it is also not the
+	 * answer to a line that asks for two of them: -h -v prints the help
+	 * because that is one action, and -h -v -p is two and is refused
+	 * before the help is printed.
 	 *
 	 * --switch is not one of the counted actions.  Naming a directory to
 	 * switch to alongside something else is refused by that other thing
@@ -328,6 +326,9 @@ int main(int argc, char *argv[])
 		if (actions > 1)
 			usage("cannot execute multiple actions");
 	}
+
+	if (help_f == 1)
+		usage(NULL);
 
 	if (version_f == 1)
 		version();
