@@ -360,6 +360,62 @@ static void no_utility_named(void)
 }
 
 /**
+ * @func second_utility_named -- report a second tool where one is allowed
+ *
+ * A find asks for one tool and a run is given one, so a line that names
+ * two is a usage mistake and is answered with the name of the second one.
+ * That is the same answer whichever way the first was named: "-f clang
+ * extra" and "-f clang -f ld" are both refused, because in both the thing
+ * that cannot be accommodated is the second name, and naming it is what
+ * makes the message actionable.  A name that is simply repeated is refused
+ * too -- Apple compares the two names, not the two flags -- so this says
+ * nothing about which of them came first.
+ */
+static void second_utility_named(const char *name)
+{
+	fprintf(stderr, "%s: error: invalid argument '%s',"
+	    " cannot specify multiple utility names\n", progname, name);
+	usage(EX_USAGE);
+}
+
+/**
+ * @func run_after_utility_named -- report a --run that follows a --find
+ *
+ * Naming a tool with --find and then asking for run mode is a contradiction
+ * rather than a duplicate: the find already said the line was not going to
+ * be executed, and --run cannot make it so.  It is named separately from
+ * second_utility_named because it is the *mode* that is refused, and the
+ * name in the message is the option that asked for it rather than a tool.
+ * The refusal is about the order, so it is only there to be raised by the
+ * later of the two: "-f clang -r /usr/bin/true" is refused and names the
+ * -r, while "-r /usr/bin/true -f clang" is a plain run of true with a -f
+ * and a clang left in its arguments, which is a question this answer is
+ * not about.
+ */
+static void run_after_utility_named(const char *option)
+{
+	fprintf(stderr, "%s: error: invalid argument '%s',"
+	    " cannot revert to \"run\" mode after specifying a utility name\n",
+	    progname, option);
+	usage(EX_USAGE);
+}
+
+/**
+ * @func unexpected_trailing_argument -- report an operand after a --show-*
+ *
+ * A --show-* answers one question and prints one line, so there is nothing
+ * for a following operand to be handed to.  Apple says "--show-sdk" in this
+ * message for --show-toolchain-path as well, which is kept: the wording is
+ * the output, and correcting it would be a difference of its own.
+ */
+static void unexpected_trailing_argument(const char *arg)
+{
+	fprintf(stderr, "%s: error: unexpected trailing argument '%s'"
+	    " with --show-sdk option\n", progname, arg);
+	usage(EX_USAGE);
+}
+
+/**
  * @func no_such_utility -- report a tool that could not be found
  *
  * The same message whether the tool was to be printed or run: the answer
@@ -2338,12 +2394,83 @@ static int xcrun_parse_xcrun_args(int argc, char *argv[], char *progname)
  * exported xcrun_main is a different function: that one is handed the tool
  * name and developer directory by libxcselect, and does not return.
  */
+
+/**
+ * @func is_option_token -- report whether an argument is still to be read
+ * @arg arg - one argument from the command line
+ * @return: non-zero when the argument is an option rather than a tool name
+ *
+ * An option begins with a dash, except where a dash is the whole of it: a
+ * lone "-" is a tool name by convention, and a "--" is the end of the
+ * options.  getopt is asked to stop at the first argument this refuses, so
+ * that the arguments after the tool name are left for the tool.  It reads
+ * a "--" itself and stops there, which is wanted, but the same call reads
+ * a lone "-" as an ordinary word -- so this is asked first, and both end
+ * the reading of options rather than becoming the tool.
+ */
+static int is_option_token(const char *arg)
+{
+	return arg[0] == '-' && arg[1] != '\0';
+}
+
+/**
+ * @func joined_option_form -- find an option spelled with an "=" in it
+ * @arg argc - number of arguments passed by user
+ * @arg argv - array of arguments passed by user
+ * @return: the offending argument, or NULL when every option is spelled
+ *         the way Apple spells it
+ *
+ * getopt_long_only accepts "--sdk=macosx" and "-f=clang" as the GNU tools
+ * spell a value that is attached to its option.  Apple's xcrun does not:
+ * every option that takes a value takes the *next* argument, and the
+ * attached spelling is not an option it knows, so it says the option is
+ * unrecognized and names the whole token including the "=".  That is the
+ * only way the message can come out right, since getopt has already
+ * consumed the token by the time the option is dispatched -- so the token
+ * is found here instead, before getopt is called at all.
+ *
+ * The scan stops at the first argument that is not an option, because
+ * everything from the tool onwards belongs to the tool: "xcrun clang
+ * -DFOO=bar" is clang's own argument, and an "=" in it says nothing about
+ * how xcrun takes its own options.  A "-" or a "--" stops it too, being
+ * the end of xcrun's options either way, and a value already consumed by
+ * the option before it is skipped so that its own "=" is not mistaken for
+ * a joined one -- "xcrun --sdk macosx=foo --show-sdk-path" is a lookup of
+ * an SDK whose name happens to contain an "=".
+ */
+static const char *joined_option_form(int argc, char *argv[])
+{
+	int i;
+	int value_consumed = 0;
+
+	for (i = 1; i < argc; i++) {
+		if (value_consumed) {
+			value_consumed = 0;
+			continue;
+		}
+		if (argv[i][0] != '-' || argv[i][1] == '\0')
+			return NULL;
+		if (strcmp(argv[i], "--") == 0)
+			return NULL;
+		if (strchr(argv[i], '=') != NULL)
+			return argv[i];
+		if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "-r") == 0 ||
+		    strcmp(argv[i], "--find") == 0 || strcmp(argv[i], "--run") == 0 ||
+		    strcmp(argv[i], "--sdk") == 0 ||
+		    strcmp(argv[i], "--toolchain") == 0)
+			value_consumed = 1;
+	}
+
+	return NULL;
+}
+
 static int xcrun_parse_args(int argc, char *argv[])
 {
 	int ch;
 	int retval = 1;
 	int optindex = 0;
 	int argc_offset = 0;
+	int options_ended_f = 0;
 	char *sdk = NULL;
 	char *toolchain = NULL;
 	char *tool_called = NULL;
@@ -2380,11 +2507,60 @@ static int xcrun_parse_args(int argc, char *argv[])
 	if (argc < 2)
 		usage(EX_USAGE);
 
-	/* Only parse arguments if they are given */
-	if (*(*(argv + 1)) == '-') {
-		if (strcmp(argv[1], "-") == 0 || strcmp(argv[1], "--") == 0)
+	/*
+	 * An option that carries its value with an "=" is not one Apple knows,
+	 * and it is refused before any of them is read rather than by the
+	 * reader, which by then no longer has the whole token to name.
+	 */
+	{
+		const char *joined = joined_option_form(argc, argv);
+
+		if (joined != NULL) {
+			fprintf(stderr, "%s: error: unrecognized option: %s\n",
+			    progname, joined);
 			usage(EX_USAGE);
-		while ((ch = getopt_long_only(argc, argv, ":+hvlr:f:nk", options, &optindex)) != (-1)) {
+		}
+	}
+
+	/*
+	 * Only parse arguments if they are given.  A leading "-" or "--" is
+	 * not a mistake to be caught here: both are how the options are
+	 * ended, and "xcrun -- clang" and "xcrun - clang" are the same
+	 * command.  getopt steps over a "--" by itself and reports a lone "-"
+	 * as an ordinary word, and the scan for the tool below steps over
+	 * both, so that neither is mistaken for the tool itself.
+	 */
+	if (*(*(argv + 1)) == '-') {
+		/*
+		 * Stop at the tool name rather than reading through it.
+		 *
+		 * The "+" in the option string below asks for that, and is
+		 * what tells getopt to leave the arguments after the first
+		 * non-option alone instead of permuting them to the end and
+		 * going back for more options.  It only has that effect as
+		 * the first character: the leading ":" has to be first, so
+		 * the "+" is read as a request for the argument-missing
+		 * answer, and getopt permutes as it always does.
+		 *
+		 * Permuting is the wrong reading of the line, and not only
+		 * because it reorders what the tool was given.  A find does
+		 * not run its tool, so there are no arguments to hand on and
+		 * everything after the name is still xcrun's own -- which is
+		 * why the scan below reads it there.  A run does hand the
+		 * rest to the tool, so "xcrun -k clang -DFOO=bar" is clang
+		 * with a -D and not an option xcrun has never heard of.
+		 * Asking getopt to keep looking would turn that into an
+		 * error, and would take the tool's own flags as xcrun's.
+		 *
+		 * The options are read by hand until the tool is reached,
+		 * and then handed to getopt one at a time from where it
+		 * stopped, so that the reader sees the same order the line
+		 * was written in and stops in the same place.
+		 */
+		while (optind < argc && is_option_token(argv[optind])) {
+			ch = getopt_long_only(argc, argv, ":+hvlr:f:nk", options, &optindex);
+			if (ch == -1)
+				break;
 			switch (ch) {
 				case 'h':
 					usage(0);
@@ -2396,16 +2572,36 @@ static int xcrun_parse_args(int argc, char *argv[])
 				case 'l':
 					log_f = 1;
 					break;
-				case 'r':
-					run_f = 1;
-					tool_called = strdup(optarg);
-					++argc_offset;
-					break;
-				case 'f':
-					find_f = 1;
-					tool_called = strdup(optarg);
-					++argc_offset;
-					break;
+			case 'r':
+				/*
+				 * A find has already said the line is not
+				 * going to be run, and this cannot make it so.
+				 * The name in the message is the option that
+				 * asked for it, which is the token itself and
+				 * not the tool it carries: a value that does
+				 * not begin with a dash means getopt took the
+				 * option and its value as two arguments, so
+				 * the one before the value is the option.
+				 */
+				if (find_f == 1) {
+					const char *option = argv[optind - 1];
+
+					if (option[0] != '-')
+						option = argv[optind - 2];
+					run_after_utility_named(option);
+				}
+				run_f = 1;
+				tool_called = strdup(optarg);
+				++argc_offset;
+				break;
+			case 'f':
+				/* A second name is refused whichever way it was given. */
+				if (find_f == 1)
+					second_utility_named(optarg);
+				find_f = 1;
+				tool_called = strdup(optarg);
+				++argc_offset;
+				break;
 				case SHOW_SDK_PATH:
 				case SHOW_SDK_VERSION:
 				case SHOW_SDK_BUILD_VERSION:
@@ -2435,8 +2631,23 @@ static int xcrun_parse_args(int argc, char *argv[])
 					switch (optindex) {
 						case 1: /* --version */
 							break;
-						case 3: /* --sdk */
-							if (*optarg != '-') {
+					case 3: /* --sdk */
+						/*
+						 * An empty argument is no argument at
+						 * all: it names nothing, so it does not
+						 * turn the environment or the default
+						 * off, and the SDK is worked out
+						 * further down as it would have been
+						 * had the option been left out.  This
+						 * is the same answer as an
+						 * unset SDKROOT, and it is reached
+						 * without counting the token as
+						 * consumed, so the tool is still
+						 * found where it was written.
+						 */
+						if (optarg[0] == '\0')
+							break;
+						if (*optarg != '-') {
 								++argc_offset;
 								sdk = optarg;
 							/* we support absolute paths and short names */
@@ -2475,8 +2686,11 @@ static int xcrun_parse_args(int argc, char *argv[])
 								exit(1);
 							}
 							break;
-						case 4: /* --toolchain */
-							if (*optarg != '-') {
+					case 4: /* --toolchain */
+						/* An empty argument, as for --sdk. */
+						if (optarg[0] == '\0')
+							break;
+						if (*optarg != '-') {
 								++argc_offset;
 								toolchain = optarg;
 								requested_toolchain = toolchain;
@@ -2552,14 +2766,73 @@ static int xcrun_parse_args(int argc, char *argv[])
 				break;
 		}
 	} else { /* We are just executing a program. */
-		tool_called = strdup(argv[1]);
-		++argc_offset;
+		/*
+		 * Nothing was read as an option and the first argument is the
+		 * tool.  The scan below is left to find it there, rather than
+		 * taking it here as well: it counts the tool once either way,
+		 * and a "-" or a "--" after the tool is still the end of
+		 * xcrun's options, which the scan knows how to step over.
+		 */
+		optind = 1;
+		argc_offset = 0;
 	}
 
-	/* The last non-option argument may be the command called. */
-	if (optind < argc && ((run_f == 0 || find_f == 0) && tool_called == NULL)) {
-		tool_called = strdup(argv[optind++]);
-		++argc_offset;
+	/*
+	 * A "-" or a "--" ends the options.  A "--" that was among the
+	 * options has already been stepped over by getopt, which stops
+	 * there and does not count it as one it returned, while a lone "-"
+	 * is not an option at all and is reported as an ordinary word.  So
+	 * either can be the next argument here, and either way what is after
+	 * it belongs to the tool.
+	 *
+	 * The marker is stepped over and not counted, because the count is
+	 * the position of the tool and the tool is not this.  A run that
+	 * already named its tool has the count pointing at the tool itself
+	 * -- the value of its -r -- and that is where the arguments begin,
+	 * so counting the marker would move that past the first of them.
+	 */
+	if (optind < argc && (strcmp(argv[optind], "-") == 0 ||
+	    strcmp(argv[optind], "--") == 0)) {
+		options_ended_f = 1;
+		++optind;
+	}
+
+	if (optind < argc) {
+		/*
+		 * What is left is xcrun's own: a find, a show, or a tool.
+		 * Which one it may be decides what the leftover word means.
+		 *
+		 * A find that has already named its tool has nothing left to
+		 * name, and the second name is what is named in the message --
+		 * even when a show was asked for as well, which is the answer
+		 * for "--show-sdk-path -f clang extra" too, since the find is
+		 * what refuses it.  Both options could not be honoured at once.
+		 */
+		if (find_f == 1 && tool_called != NULL) {
+			second_utility_named(argv[optind]);
+		} else if (show_kind != SHOW_NONE || show_toolchain_f == 1) {
+			/*
+			 * A show answers one question and prints one line, so
+			 * there is nothing to hand a word to.  A tool named
+			 * by a -f alongside a show is not a leftover -- it was
+			 * read as an option's value, and the show is answered
+			 * as asked: "--show-sdk-path -f clang" prints the path.
+			 */
+			unexpected_trailing_argument(argv[optind]);
+		} else if (tool_called == NULL) {
+			tool_called = strdup(argv[optind++]);
+			/*
+			 * The count is the position of the tool, so it is set
+			 * to where the tool was found rather than added to.
+			 * Counting on cannot be right here: getopt does not
+			 * return a "--" it stepped over, so a line that ended
+			 * its options that way has read one more argument than
+			 * it has returned, and the count came out one short.
+			 * That hands the run the marker as its first argument,
+			 * and it looks for a tool named "--".
+			 */
+			argc_offset = optind - 1;
+		}
 	}
 
 	/*
@@ -2570,11 +2843,16 @@ static int xcrun_parse_args(int argc, char *argv[])
 	 * it is the one thing that is still printed when it arrived with
 	 * -v, -l or -n instead of with a tool -- the trace of the lookup is
 	 * what the combination asks for.
+	 *
+	 * A "-" or a "--" on its own is the same question asked with no
+	 * answer, so it is answered with a tool that was never named, and
+	 * says no more than that: ending the options is not a mistake, and
+	 * the only mistake is the empty line it left.
 	 */
 	if (tool_called == NULL && show_kind == SHOW_NONE &&
 	    show_toolchain_f == 0 &&
-	    (verbose_f == 1 || log_f == 1 || nocache_f == 1 ||
-	     find_f == 1 || run_f == 1))
+	    (options_ended_f == 1 || verbose_f == 1 || log_f == 1 ||
+	     nocache_f == 1 || find_f == 1 || run_f == 1))
 		no_utility_named();
 
 	/* Print version? */

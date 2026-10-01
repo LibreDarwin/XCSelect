@@ -11,7 +11,7 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 242/242  the wide argument sweep plus the shipped
+  xcrunmatrix.sh 332/332  the wide argument sweep plus the shipped
               xcrun binary's DEVELOPER_DIR edges: Apple xcrun vs
               build/release/libxcrun.dylib through the driver, and vs
               build/release/xcrun where the dev dir is the variable;
@@ -92,8 +92,8 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The wider xcrunmatrix.sh (242 rows, `make -C tests matrix`) matches
-Apple on all 242, on both the Xcode.app and the CommandLineTools
+The wider xcrunmatrix.sh (332 rows, `make -C tests matrix`) matches
+Apple on all 332, on both the Xcode.app and the CommandLineTools
 layouts.  The three check suites pass 100%.  Getting there took a few
 things worth knowing, since each is easy to get backwards:
 
@@ -192,6 +192,24 @@ things worth knowing, since each is easy to get backwards:
     uses `diff -q` for exactly this reason, and the first version's
     failure looked like a product regression: 357 rows failing at
     rc 126/126 and the total reading 598 rather than 242.
+
+  * The CASES list is turned into arguments with `set -- $c`, so it
+    cannot hold an empty operand: written as "--sdk '' --show-sdk-path"
+    it arrives as "--sdk --show-sdk-path", a different question that the
+    list already asks.  The empty-operand rows are a separate section
+    after the loop that passes its arguments as written, so the empty one
+    is passed as an empty one.
+
+  * A row belongs here only once it matches.  Two cases that this work
+    found are still different from Apple and are recorded in
+    local/xcselect.md rather than committed here, because a matrix whose
+    every row passes is the thing that makes a failure mean something.
+    Naming an empty tool for a lookup (`-f ''`) is one of them: Apple
+    answers it from the toolchain's own directory under a full Xcode and
+    reports the name it cannot find under the CommandLineTools, and ours
+    answers the other way round in each.  The other is a run of a tool
+    named rather than named by path under -v, which reports one trace
+    line less than Apple does.
 
 Write-side parity (-s / -r) is NOT in these matrices: -s rewrites the one
 selection the whole system reads, so it must run as root, and there is no

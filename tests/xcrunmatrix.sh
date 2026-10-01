@@ -115,6 +115,71 @@ CASES=(
   "-v --find /usr/bin/true" "-v /usr/bin/true"
   "-v --kill-cache --find clang" "-v --kill-cache --find nosuchtool"
   "-v --sdk bogusfoo --find clang"
+
+  # How the options are ended, and where xcrun's own reading of the line
+  # stops.  A "-" and a "--" both end the options rather than being a
+  # mistake, and on their own they are the same question with no tool in
+  # it, so they are answered as one.  The rows that follow are the
+  # difference between the two markers: getopt reads a "--" and stops,
+  # and reports a lone "-" as an ordinary word, so the count of what was
+  # read is one apart between them -- which is what decides where the
+  # tool's own arguments begin.
+  "--" "-"
+  "-- clang -v" "- clang -v"
+  "-- /usr/bin/true a b" "- /usr/bin/true a b"
+  "-r /usr/bin/true -- a b" "-r /usr/bin/true - a b"
+  "-f clang --" "-f clang -"
+
+  # A second tool name, and a --run that follows a --find.  Both are
+  # refusals rather than lookups, so both are answered with rc 64 and
+  # name what could not be taken: the second name, or the option that
+  # asked for a mode the find had already ruled out.  A name that is
+  # only repeated is refused too, since Apple compares the two names and
+  # not the two flags, and an empty name is still a name.
+  "-f clang extra" "-f clang -" "-f clang -- extra"
+  "-f clang -f ld" "-f clang -f clang" "-f clang --find ld"
+  "--find clang extra"
+  "-f '' -f clang" "-f '' --find clang"
+  # ...but the rows whose operand really is empty cannot be written that
+  # way, because the loop above splits each case into words and an empty
+  # operand is not a word.  They are run from the section after the loop,
+  # which passes the arguments as they are written.
+  "-f clang -r /usr/bin/true" "-f clang --run /usr/bin/true"
+  "-r /usr/bin/true -f clang"
+
+  # What a --show-* does with a word that follows it.  There is nothing
+  # to hand it, so the word is named as trailing -- but a tool named by
+  # a -f alongside the show is not a leftover word, and a show that
+  # arrives with a second name is refused by the find before the show is
+  # reached, which is why "--show-sdk-path -f clang extra" names a
+  # second utility and not a trailing argument.
+  "--show-sdk-path extra" "--show-sdk-path -- clang"
+  "--show-sdk-version extra" "--show-toolchain-path extra"
+  "--show-sdk-path -f clang" "--show-sdk-path -f clang extra"
+
+  # An option that carries its value with an "=".  Apple takes no option
+  # that way, so the whole token is named as an option it does not know,
+  # "=" and all.  A "=" inside the value of a separate argument is not
+  # the same thing and is left alone: "--sdk macosx=foo" is a lookup of
+  # an SDK whose name contains one.  What follows the tool name is the
+  # tool's own, so an "=" in a tool's arguments is not this either --
+  # and that is the row that catches reading through the tool, since
+  # getopt permutes by default and would go back for -D after the name.
+  "--sdk=macosx" "--sdk=" "--toolchain=XcodeDefault" "--toolchain="
+  "-f=clang" "-r=" "--version=1" "--show-sdk-path=1"
+  "-DFOO=bar" "-f clang -DFOO=bar"
+  # ...and the two that are the tool's own arguments rather than xcrun's
+  # options, which is what stopping at the tool name is for.  ("-v" is
+  # left out of this pair: a run of a tool named rather than named by path
+  # reports one trace line less than Apple does, which is a pre-existing
+  # difference recorded in local/xcselect.md and is not about where the
+  # options end.)
+  "clang -DFOO=bar" "-k clang -DFOO=bar"
+
+  # An empty --sdk or --toolchain names nothing, so it does not turn the
+  # environment or the default off: it is the same answer as not asking.
+  # The rows are in the section after the loop, where an empty operand
+  # survives to be passed.
 )
 
 total=0; diffs=0
@@ -226,6 +291,40 @@ for d in "$X" "$C"; do
     prime_stable run_lib "$@"
     cmp "$c" run_lib run_ours_lib "$@"
   done
+done
+
+# Cases whose operand is an empty string.  They are here rather than in
+# CASES because the loop above turns each case into words, and an empty
+# operand is not one of the words it produces: written as "--sdk '' ..." it
+# arrives as "--sdk ...", which is a different question entirely and one the
+# CASES list already asks.  Each row below is written as the arguments
+# themselves, so the empty one is passed as an empty one.
+#
+# What is being checked is that an empty operand is not mistaken for a
+# name.  A name would be resolved and, not existing, would be reported as
+# a name that cannot be located -- so the answer to "--sdk ''" is the
+# default SDK and the answer to "--toolchain ''" is the default toolchain,
+# neither of which is an error at all.  The same applies to a find whose
+# tool name is empty: an empty name is still a name, so it counts as the
+# one a find is allowed, which is why "-f '' --find clang" is a refusal
+# of the second name rather than a lookup of the first.
+echo "=== empty operands ==="
+for d in "$X" "$C"; do
+  devd=$d
+  prime_stable run_lib --sdk ""
+  cmp "--sdk '' --show-sdk-path" run_lib run_ours_lib --sdk "" --show-sdk-path
+  cmp "--sdk '' --find clang" run_lib run_ours_lib --sdk "" --find clang
+  cmp "--toolchain '' --find clang" run_lib run_ours_lib --toolchain "" --find clang
+  cmp "--toolchain '' --show-toolchain-path" run_lib run_ours_lib --toolchain "" --show-toolchain-path
+  # "-f ''" is not here.  An empty name is a name for the purposes of a
+  # find, which is the row below, but naming one for a lookup is a case
+  # this unit did not touch: Apple answers it from the toolchain's own
+  # directory under a full Xcode and reports the name it cannot find under
+  # the command line tools, and ours answers the other way round in each.
+  # That difference predates the work here and is recorded in
+  # local/xcselect.md; a row that cannot pass yet does not belong in a
+  # matrix whose every row is supposed to match.
+  cmp "-f '' --find clang" run_lib run_ours_lib -f "" --find clang
 done
 
 # Every row above compares a warm Apple against ours, because the warm-up
