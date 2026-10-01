@@ -92,6 +92,29 @@ CASES=(
   "--log --run /usr/bin/true"
   "-l -r /usr/bin/true"
 
+  # A toolchain name is answered with the spelling on disk whatever case
+  # it was written in, so these are all the one installed name.  A volume
+  # that is case-insensitive -- which is the default -- accepts the wrong
+  # case at stat() and would hand it back verbatim, printing a path that
+  # resolves by luck of the volume and spells no directory that exists.
+  # The suffix is stripped case-insensitively too, so its spelling does not
+  # matter either, and asking for the older suffix still finds the bundle.
+  "--toolchain xcodedefault --show-toolchain-path"
+  "--toolchain XCODEDEFAULT --show-toolchain-path"
+  "--toolchain XcOdEdefault --show-toolchain-path"
+  "--toolchain xcodeDefault.xctoolchain --show-toolchain-path"
+  "--toolchain xcodedefault.toolchain --show-toolchain-path"
+  "--toolchain xcodeDefault.XCTOOLCHAIN --show-toolchain-path"
+  # ...and the name is canonical where it is used rather than only printed,
+  # which is what a --find and a -f both resolve through.
+  "--toolchain xcodedefault --find clang"
+  "--toolchain xcodedefault -f clang"
+  "--toolchain xcodedefault --show-sdk-path"
+  # A name that is not installed is still answered with the default, and
+  # the case of a name that is not installed is not what decides that.
+  "--toolchain BOGUSFOO --show-toolchain-path"
+  "--toolchain BOGUSFOO --find clang"
+
   "--sdk macosx --print-sdk" "--log" "--no-cache --find clang"
 
   # Verbose trace: manpath/environment/tool keys.  The "lookup resolved"

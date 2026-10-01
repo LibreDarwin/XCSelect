@@ -11,7 +11,7 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 332/332  the wide argument sweep plus the shipped
+  xcrunmatrix.sh 354/354  the wide argument sweep plus the shipped
               xcrun binary's DEVELOPER_DIR edges: Apple xcrun vs
               build/release/libxcrun.dylib through the driver, and vs
               build/release/xcrun where the dev dir is the variable;
@@ -92,8 +92,8 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The wider xcrunmatrix.sh (332 rows, `make -C tests matrix`) matches
-Apple on all 332, on both the Xcode.app and the CommandLineTools
+The wider xcrunmatrix.sh (354 rows, `make -C tests matrix`) matches
+Apple on all 354, on both the Xcode.app and the CommandLineTools
 layouts.  The three check suites pass 100%.  Getting there took a few
 things worth knowing, since each is easy to get backwards:
 
@@ -210,6 +210,20 @@ things worth knowing, since each is easy to get backwards:
     answers the other way round in each.  The other is a run of a tool
     named rather than named by path under -v, which reports one trace
     line less than Apple does.
+
+  * A toolchain name is compared the way Apple compares it, which is
+    without regard to case, and the answer is spelled the way the disk
+    spells it.  That is not a shortcut row: the volume is
+    case-insensitive, so stat("<dev>/Toolchains/xcodedefault.xctoolchain")
+    succeeds for a directory installed as XcodeDefault, and taking that
+    string for an answer produces a path that resolves by luck of the
+    volume and spells no directory that exists.  Reading the directory
+    is the only way to learn the real spelling -- the same reason
+    xt_find_toolchain reads Toolchains/ rather than statting the request,
+    and the same reason the SDK lookup already scans.  Which entry
+    readdir hands over first is not allowed to decide it, so a name
+    installed under both the .xctoolchain and .toolchain suffixes is
+    answered with the first, as Apple does.
 
 Write-side parity (-s / -r) is NOT in these matrices: -s rewrites the one
 selection the whole system reads, so it must run as root, and there is no

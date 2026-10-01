@@ -411,25 +411,148 @@ xt_sdk_platform_path(const char *sdkpath)
 	return NULL;
 }
 
+/*
+ * The two directory suffixes a toolchain is installed under, most recent
+ * first.  Apple looks for <name>.xctoolchain and then <name>.toolchain, so
+ * a name installed under both is answered with the first.
+ */
+static const char *const toolchain_suffixes[] = {
+	".xctoolchain", ".toolchain", NULL
+};
+
+/* One slot per suffix, so readdir order cannot decide which one answers. */
+#define TOOLCHAIN_SUFFIX_COUNT \
+	(sizeof(toolchain_suffixes) / sizeof(toolchain_suffixes[0]) - 1)
+
+/*
+ * Whether a directory entry names the toolchain that was asked for.
+ *
+ * The name is compared whole, suffix included and without regard to case,
+ * because that is the question: is this entry the one the caller meant?
+ * The suffix is part of the comparison rather than trimmed off and
+ * compared separately so that a request for "foo.xctoolchain" cannot be
+ * answered by an entry called "foo.xctoolchain.toolchain".
+ */
+static int
+is_named_toolchain(const char *entry, const char *name)
+{
+	return strcasecmp(entry, name) == 0;
+}
+
+/**
+ * @func find_toolchain_canonical -- resolve a toolchain name as spelled on disk
+ * @arg devdir - developer directory whose Toolchains directory is searched
+ * @arg name - toolchain name as requested, with any suffix already removed
+ * @return: malloc'd path spelled as the installed directory spells it
+ *
+ * macOS volumes are usually case-insensitive, so stat("<dev>/Toolchains/
+ * xcodedefault.xctoolchain") succeeds for the directory installed as
+ * XcodeDefault.xctoolchain -- and would then be handed back verbatim, a
+ * path that resolves for the caller by luck of the volume and spells no
+ * directory that exists.  Apple answers with the real spelling whatever
+ * case the request was written in, so `--toolchain xcodedefault
+ * --show-toolchain-path` prints .../Toolchains/XcodeDefault.xctoolchain.
+ *
+ * Finding it therefore means reading the directory and comparing the
+ * entries, which is also what makes the answer work on a case-sensitive
+ * volume: there the literal stat fails outright and this is the only way
+ * the name resolves at all.  This is the same shape, and for the same
+ * reason, as the canonical-name search for an SDK named in the wrong case
+ * elsewhere in this file.
+ *
+ * There is deliberately no "ask for the exact path first" shortcut.  On a
+ * case-insensitive volume the two are indistinguishable -- stat of the
+ * requested spelling succeeds precisely by not matching it -- so a
+ * shortcut that returned that path would be the very thing being fixed.
+ * Reading the directory is the only way to learn how the entry is spelled.
+ * The cost is one readdir of a directory holding one entry or two.
+ *
+ * Only a directory counts.  A file called foo.xctoolchain in the
+ * Toolchains directory is not a toolchain, and the stat below says so
+ * rather than trusting the name.
+ */
+static char *
+find_toolchain_canonical(const char *devdir, const char *name)
+{
+	char dirpath[PATH_MAX], buf[PATH_MAX];
+	struct dirent *e;
+	DIR *d;
+	char *found[TOOLCHAIN_SUFFIX_COUNT] = { NULL };
+	int i;
+
+	snprintf(dirpath, sizeof(dirpath), "%s/Toolchains", devdir);
+	if ((d = opendir(dirpath)) == NULL) {
+		/*
+		 * No Toolchains directory at all, as under the Command Line
+		 * Tools.  The literal path is built anyway, because a
+		 * directory that is not there contributes nothing to the PATH
+		 * it goes into and refusing here would be a difference of its
+		 * own -- see the caller.
+		 */
+		for (i = 0; toolchain_suffixes[i] != NULL; i++) {
+			char *path = build_path(devdir, "/Toolchains/", name,
+			    toolchain_suffixes[i]);
+
+			if (path != NULL && is_dir(path))
+				return path;
+			free(path);
+		}
+		return NULL;
+	}
+
+	while ((e = readdir(d)) != NULL) {
+		size_t len = strlen(e->d_name);
+		size_t slen;
+
+		for (i = 0; toolchain_suffixes[i] != NULL; i++) {
+			slen = strlen(toolchain_suffixes[i]);
+			if (len <= slen)
+				continue;
+			if (strcasecmp(e->d_name + len - slen,
+			    toolchain_suffixes[i]) != 0)
+				continue;
+
+			/*
+			 * Compare against the entry with the suffix still on
+			 * it, since that is the whole of what the caller named.
+			 */
+			snprintf(buf, sizeof(buf), "%s%s", name,
+			    toolchain_suffixes[i]);
+			if (!is_named_toolchain(e->d_name, buf))
+				continue;
+
+			/*
+			 * The entry is named the way it was asked for.  It is
+			 * still not necessarily the directory: only a stat can
+			 * say that, and on a case-insensitive volume a stat of
+			 * the request would also answer for a name that is
+			 * not installed -- which is why the spelling is
+			 * settled by reading the directory rather than by the
+			 * literal path the caller would have got.
+			 */
+			snprintf(buf, sizeof(buf), "%s/Toolchains/%s",
+			    devdir, e->d_name);
+			if (found[i] == NULL && is_dir(buf))
+				found[i] = strdup(buf);
+			break;
+		}
+	}
+	closedir(d);
+
+	for (i = 0; toolchain_suffixes[i] != NULL; i++)
+		if (found[i] != NULL)
+			return found[i];
+
+	return NULL;
+}
+
 char *
 xt_find_toolchain(const char *devdir, const char *name)
 {
-	char *path;
-
 	if (devdir == NULL || name == NULL)
 		return NULL;
 
-	path = build_path(devdir, "/Toolchains/", name, ".xctoolchain");
-	if (path != NULL && is_dir(path))
-		return path;
-	free(path);
-
-	path = build_path(devdir, "/Toolchains/", name, ".toolchain");
-	if (path != NULL && is_dir(path))
-		return path;
-	free(path);
-
-	return NULL;
+	return find_toolchain_canonical(devdir, name);
 }
 
 /*
