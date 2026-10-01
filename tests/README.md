@@ -11,12 +11,12 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 224/224  the wide argument sweep plus the shipped
+  xcrunmatrix.sh 242/242  the wide argument sweep plus the shipped
               xcrun binary's DEVELOPER_DIR edges: Apple xcrun vs
               build/release/libxcrun.dylib through the driver, and vs
               build/release/xcrun where the dev dir is the variable;
-              every case matching Apple's transcript; run via
-              `make -C tests matrix`, not check
+              224 warm rows and 18 cold-cache rows, every case matching
+              Apple's transcript; run via `make -C tests matrix`, not check
 
 The first four are `make -C tests check`; the last is `make -C tests
 matrix`, and `make -C tests test` runs both.  sandbox.sh is in check even
@@ -92,9 +92,9 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The wider xcrunmatrix.sh (192 rows, `make -C tests matrix`) matches
-Apple on all 192, on both the Xcode.app and the CommandLineTools
-layouts.  The three check suites pass 100%.  Getting there took three
+The wider xcrunmatrix.sh (242 rows, `make -C tests matrix`) matches
+Apple on all 242, on both the Xcode.app and the CommandLineTools
+layouts.  The three check suites pass 100%.  Getting there took a few
 things worth knowing, since each is easy to get backwards:
 
   * Coverage is the reason the score is believable.  --help and --run
@@ -138,11 +138,60 @@ things worth knowing, since each is easy to get backwards:
     item lookup.  Ours reads that key and skips the same two steps, which
     is why the first run of a bad name and the ones after it differ.
 
-  * Whether a tool lookup goes out to xcodebuild is a question about the
-    cache, not about the developer directory: a warm run answers from
-    what it has learned, and only --no-cache or --kill-cache re-asks.
-    Delegating unconditionally is what the first version of this did,
-    and it fails the warm cases.
+  * Whether a lookup goes out to xcodebuild is a question about the
+    cache, not about the developer directory.  A warm run answers from
+    what the file has learned; a run whose answer is not in the file --
+    a cold cache, --no-cache, --kill-cache -- asks.  And the file is
+    only ever asked whether it holds a key, never what it holds: it is
+    the shipped library's own, its framing is not ours to depend on, so
+    the value is computed the way Apple computes it and the file settles
+    only which of the two things xcrun says about a lookup it was going
+    to make anyway it says.  Delegating unconditionally is what the
+    first version of this did, and it fails the warm cases; asking
+    unconditionally is what the second did, and it fails the cold ones.
+
+  * That is also why the manual page note needed the same gate.  It says
+    where the answer came from, so a run that had to ask the toolchain
+    where the SDK is has no lookup to report: the manual page path came
+    back with the SDK.  Asking the file settles it without a second
+    mechanism, because Apple files a successful manual page answer under
+    the path the name resolved to and files a name that resolved to
+    nothing under the name as given, so the key is present exactly when
+    there was a lookup to report.  A separate "the SDK came from
+    xcodebuild" flag was written first and mutation testing showed it
+    was unreachable -- every one of its rows still passed with it
+    disabled -- so it was deleted rather than left in as dead code.
+
+  * The 18 cold rows are the ones that say where an answer came from.
+    Ours -k does not empty the file: the shipped -k rewrites it, which
+    means writing Apple's private XR1L framing, and ours sets the flag
+    that stops it reporting a cached answer but leaves the file alone.
+    So the cold section is emptied by the *Apple* side, before each
+    side, since a row emptied by ours would hand the second side a warm
+    file and quietly stop being cold.  That divergence is recorded in
+    local/xcselect.md rather than papered over here.
+
+  * A warm row has to be warm for a reason the harness checked, because
+    ours never writes the file and so is warm by construction: any state
+    Apple happens to be in is a state ours will be compared in.  The
+    first version warmed each row with a single Apple run and the warm
+    bogusfoo row failed about one time in six, because a run whose SDK
+    lookup misses does not always file what it learned -- six of twelve
+    identical cold runs left the key behind and six did not.  So the
+    warm-up (prime_stable) repeats the row until two consecutive
+    normalized transcripts agree, which is the cache having stopped
+    changing what a run does, and a row that never settles falls through
+    to the comparison rather than being skipped.  It checks the
+    transcript, not a checksum of the file: that would need this harness
+    to know Apple's key format and framing, which is the thing the cold
+    rows exist to avoid depending on.
+
+  * `cmp` is this harness's own comparison function, so `cmp -s` inside
+    it is not the cmp(1) utility -- it calls the function with two file
+    paths as its two runners and tries to execute them.  prime_stable
+    uses `diff -q` for exactly this reason, and the first version's
+    failure looked like a product regression: 357 rows failing at
+    rc 126/126 and the total reading 598 rather than 242.
 
 Write-side parity (-s / -r) is NOT in these matrices: -s rewrites the one
 selection the whole system reads, so it must run as root, and there is no

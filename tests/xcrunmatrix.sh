@@ -135,7 +135,23 @@ cmp() {
   local label=$1 arun=$2 orun=$3
   shift 3
   local inf=${CMP_STDIN:-/dev/null}
+  # CMP_COLD empties the cache file before each side rather than once before
+  # the pair.  Once would not do: the first side to run refills what the
+  # other was meant to find cold, and the row would compare a warm run with a
+  # cold one and call it a difference in the product.
+  #
+  # The emptying is done by the *first* runner, and that runner has to be the
+  # one whose -k empties the file at all: ours sets the flag that stops it
+  # reporting a cached answer but leaves the file exactly as it found it, so
+  # a row emptied by it would hand the second side a warm file and quietly
+  # stop being cold.  That is a real divergence from the shipped library and
+  # it is recorded in local/xcselect.md rather than papered over here -- what
+  # this section is checking is which transcript a cold lookup produces, not
+  # what -k does to the file, and a row that quietly stopped being cold would
+  # be worse than no row.
+  [ "${CMP_COLD:-0}" = 1 ] && "$arun" -k >/dev/null 2>&1
   "$arun" "$@" >"$ST/a.out" 2>"$ST/a.err" <"$inf"; local ar=$?
+  [ "${CMP_COLD:-0}" = 1 ] && "$arun" -k >/dev/null 2>&1
   "$orun" "$@" >"$ST/o.out" 2>"$ST/o.err" <"$inf"; local or_=$?
   norm "$ST/a.out" > "$ST/a.out.n"; norm "$ST/o.out" > "$ST/o.out.n"
   norm "$ST/a.err" > "$ST/a.err.n"; norm "$ST/o.err" > "$ST/o.err.n"
@@ -157,17 +173,95 @@ cmp() {
 run_lib() { DEVELOPER_DIR=$devd /usr/bin/xcrun "$@"; }
 run_ours_lib() { DRIVE_DEV=$devd DRIVE_LIB=$LIB "$DRIVE" "$@"; }
 
+# Warm a row to a state the cache has actually settled into, rather than
+# assuming one run was enough.
+#
+# One run is not enough, and the reason is Apple's, not ours: a run whose SDK
+# lookup misses does not always file what it learned.  Six of twelve
+# identical cold runs of `--sdk bogusfoo --find clang` left a key behind and
+# six did not, so the run after a warm-up can still be the first one to find
+# the answer.  A row that compared that against ours -- which was warm, because
+# the key it did not write had been written by an earlier run in the pair --
+# was measuring which run happened to write the file, not the two
+# implementations, and it failed about one time in six.
+#
+# So the warm-up repeats until two consecutive runs print the same thing,
+# which is the same as saying the cache has stopped changing what a run does,
+# and it is checked on the normalized transcript because that is what gets
+# compared.  Deliberately not a checksum of the cache file: that would need
+# this harness to know Apple's key format and file framing, and the property
+# under test is that a run's output has stopped moving.  Bounded at four runs,
+# and a row that never settles falls through to the comparison anyway rather
+# than being skipped -- both sides then see whatever state the cache is
+# really in, which is the honest comparison.
+#
+# diff -q and not cmp -s: cmp is this script's own comparison function, so
+# `cmp -s` here would call it with two file paths as its two runners, and it
+# would try to execute them.
+prime_stable() {
+  local arun=$1; shift
+  local i prc=""
+  for i in 1 2 3 4; do
+    "$arun" "$@" >"$ST/pa.raw" 2>"$ST/pe.raw"; local rc=$?
+    norm "$ST/pa.raw" >"$ST/pa.out"; norm "$ST/pe.raw" >"$ST/pa.err"
+    if [ "$i" -gt 1 ] && [ "$rc" = "$prc" ] \
+       && diff -q "$ST/pa.out" "$ST/pb.out" >/dev/null \
+       && diff -q "$ST/pa.err" "$ST/pb.err" >/dev/null
+    then
+      return 0
+    fi
+    prc=$rc
+    cp "$ST/pa.out" "$ST/pb.out"; cp "$ST/pa.err" "$ST/pb.err"
+  done
+  return 0
+}
+
 for d in "$X" "$C"; do
   echo "=== $(basename "$d") ==="
   for c in "${CASES[@]}"; do
     # shellcheck disable=SC2086
     set -- $c
     devd=$d
-    # warm plist-sensitive Apple calls; the second run is the steady state
-    run_lib "$@" >/dev/null 2>&1
+    # warm plist-sensitive Apple calls; the steady state is the one compared
+    prime_stable run_lib "$@"
     cmp "$c" run_lib run_ours_lib "$@"
   done
 done
+
+# Every row above compares a warm Apple against ours, because the warm-up
+# above primes Apple's side first.  That is what makes them stable, and it is
+# also why they cannot see a lookup that reports where its answer came from:
+# Apple is never the cold side of the comparison, and ours reported a
+# database answer for every lookup whether or not the file had one.  Those two
+# facts are the same fact -- nothing in the file had to be true for ours to
+# say so -- and nothing in the rows above could have told.
+#
+# "Warm" here is a state prime_stable verified rather than one warm-up run
+# assumed, which it has to be: a single run leaves Apple's own cache in a state
+# that decides the next row.
+#
+# So the cold half is here, where the file is emptied before each side and
+# both are made to answer the same question from nothing.  A lookup answered
+# from the file names the file; one that had to ask xcodebuild says what it
+# asked and what came back; one answered by walking a flat layout's
+# directories says nothing at all, because that is not a question anyone
+# asked.  Those are three different transcripts for one query, and which one
+# a run produces is the whole of what these rows check.
+echo "=== cold cache, emptied before each side ==="
+CMP_COLD=1
+for d in "$X" "$C"; do
+  echo "=== $(basename "$d") ==="
+  for c in "-v --find clang" "-v --find ld" "-v --find cups-config" \
+           "-v --find definitely-not-a-tool" "--find clang" \
+           "-v --sdk macosx --find clang" "-v --sdk bogusfoo --find clang" \
+           "-v --kill-cache --find clang" "-v --no-cache --find clang"; do
+    # shellcheck disable=SC2086
+    set -- $c
+    devd=$d
+    cmp "$c" run_lib run_ours_lib "$@"
+  done
+done
+unset CMP_COLD
 
 # The rows above reach libxcrun directly, so they cannot see a developer
 # directory being rejected: that check is in libxcselect, one layer up, and
