@@ -7,7 +7,7 @@
 # normalized away where a forked tool is involved.
 
 Current results (default fixtures, Apple macOS build):
-  xsmatrix.sh    30/30  /usr/bin/xcode-select vs build/release/xcode-select
+  xsmatrix.sh   120/120  /usr/bin/xcode-select vs build/release/xcode-select
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
@@ -26,6 +26,20 @@ already established, and it takes about 0.7s.  It was separate for a
 while, which meant the only harness proving the -s/-p contract, and the
 only one checking the root gate is real, was not run by the default
 target.
+
+xsmatrix.sh is the one that carries the argument grammar, so it is where
+a parser is pinned down: an option is one fixed spelling, and clustering
+(`-pv`), `--`, any long prefix (`--print-p`), and attached or `=` forms
+(`-s/path`, `--switch=/path`) are each invalid arguments rather than
+accepted.  It also names the first bad token left to right, keeps `-h`
+out of the action count, and pins what `-s`/`--switch` will and will not
+switch to (a plain file, a path with a file in it, a missing component,
+a directory that is not developer contents, a symlink followed to what
+it lands on).  Those `--switch` rows name directories a root run would
+accept, so the script refuses to run as root rather than move the real
+selection; the write paths are sandbox.sh's job.  One shape cannot be a
+row: the case table word-splits its argument column, so an empty
+argument (`-s ''`) is not expressible and is covered by hand.
 
 Products and drivers
 --------------------
