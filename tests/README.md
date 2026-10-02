@@ -11,11 +11,11 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 408/408  the wide argument sweep plus the shipped
+  xcrunmatrix.sh 432/432  the wide argument sweep plus the shipped
               xcrun binary's DEVELOPER_DIR edges: Apple xcrun vs
               build/release/libxcrun.dylib through the driver, and vs
               build/release/xcrun where the dev dir is the variable;
-              390 warm rows and 18 cold-cache rows, every case matching
+              414 warm rows and 18 cold-cache rows, every case matching
               Apple's transcript; run via `make -C tests matrix`, not check
 
 The first four are `make -C tests check`; the last is `make -C tests
@@ -92,8 +92,8 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The wider xcrunmatrix.sh (408 rows, `make -C tests matrix`) matches
-Apple on all 408, on both the Xcode.app and the CommandLineTools
+The wider xcrunmatrix.sh (432 rows, `make -C tests matrix`) matches
+Apple on all 432, on both the Xcode.app and the CommandLineTools
 layouts.  The three check suites pass 100%.  Getting there took a few
 things worth knowing, since each is easy to get backwards:
 
@@ -192,6 +192,23 @@ things worth knowing, since each is easy to get backwards:
     uses `diff -q` for exactly this reason, and the first version's
     failure looked like a product regression: 357 rows failing at
     rc 126/126 and the total reading 598 rather than 242.
+
+  * A question that lives in the environment rather than on the command
+    line needs the harness to carry one, which it could not until
+    `CMP_ENV` existed (the `CMP_STDIN` of the --run rows is the same
+    idea, and predates it).  `TOOLCHAINS` had been checked by hand and
+    had no row for exactly this reason, and a CASES entry cannot express
+    it: the loop turns each case into words with `set -- $c`, and an env
+    prefix is not a word.  `CMP_ENV` is a list of `VAR=value` handed to
+    both runners ahead of what the harness sets, so a row cannot point
+    `DEVELOPER_DIR` somewhere else by accident, and unset it expands to
+    nothing at all -- which is why adding it changed no existing row.
+    Priming each of the new rows was not a habit: the variable's value
+    is part of the cache key, so each group was the first run to ask for
+    its key and started cold while ours found the key the previous run
+    had filed.  Four rows in each layout failed that way, and the first
+    row of each group passed only because an earlier row had warmed the
+    same key.
 
   * The CASES list is turned into arguments with `set -- $c`, so it
     cannot hold an empty operand: written as "--sdk '' --show-sdk-path"

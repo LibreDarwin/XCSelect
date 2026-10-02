@@ -282,8 +282,18 @@ cmp() {
 # Through the driver, into libxcrun, with a developer directory libxcselect
 # has already vouched for -- which is the only way libxcrun is called in
 # anger, and why $X and $C are the only directories it is given below.
-run_lib() { DEVELOPER_DIR=$devd /usr/bin/xcrun "$@"; }
-run_ours_lib() { DRIVE_DEV=$devd DRIVE_LIB=$LIB "$DRIVE" "$@"; }
+#
+# $CMP_ENV, when set, is a list of "VAR=value" words handed to both sides.
+# It is how a row can ask a question that is in the environment rather than
+# on the command line -- TOOLCHAINS names a toolchain with no option of its
+# own -- which is why TOOLCHAINS had no row until this existed.  Unset, it
+# expands to no words and both sides are called exactly as they were, so a
+# section that does not set it changes no row's environment.  It goes first
+# so the variables the harness sets below are the ones that win: a row
+# cannot quietly point DEVELOPER_DIR somewhere else.
+CMP_ENV=()
+run_lib() { env "${CMP_ENV[@]}" DEVELOPER_DIR=$devd /usr/bin/xcrun "$@"; }
+run_ours_lib() { env "${CMP_ENV[@]}" DRIVE_DEV=$devd DRIVE_LIB=$LIB "$DRIVE" "$@"; }
 
 # Warm a row to a state the cache has actually settled into, rather than
 # assuming one run was enough.
@@ -378,13 +388,82 @@ for d in "$X" "$C"; do
   cmp "-f '' --find clang" run_lib run_ours_lib -f "" --find clang
 done
 
+# TOOLCHAINS, which names a toolchain without naming it on the command line.
+# It was verified by hand for as long as it existed and had no row, because
+# every runner above called its command with no environment of its own and an
+# env prefix is not a word the CASES loop could pass.  The rows below are the
+# reason $CMP_ENV exists.
+#
+# A -v find prints the value back, so these rows can tell honoring the
+# variable from ignoring it: one that dropped it would answer with an empty
+# TOOLCHAINS and match nothing here.  Which name is asked for does not change
+# the path under a full Xcode, because all three spell the one toolchain
+# installed there -- a name that is not installed is answered with the
+# default, the same answer --toolchain gives for one, so the toolchain-path
+# rows are about which answer is chosen rather than what it looks like.  The
+# bundle-id spelling is the one that reads differently: it is carried whole
+# into the cache key, so that find prints a "database key is:" line that no
+# other spelling prints.
+#
+# Every row is primed, and that is not a habit here: the value of the
+# variable is part of the cache key, so each group below is the first run to
+# ask for its key and started cold, while ours found the key the run before
+# it had filed.  Unprimed, four rows in each layout failed as a warm answer
+# compared with a cold one.  The first row of each group passed anyway --
+# only because an earlier row had warmed the same key -- which is exactly the
+# luck prime_stable exists to take out.
+echo "=== TOOLCHAINS ==="
+for d in "$X" "$C"; do
+  devd=$d
+  CMP_ENV=(TOOLCHAINS=xcodedefault)
+  prime_stable run_lib --find clang
+  cmp "TOOLCHAINS=xcodedefault --find clang" run_lib run_ours_lib --find clang
+  cmp "TOOLCHAINS=xcodedefault -v --find clang" run_lib run_ours_lib -v --find clang
+  cmp "TOOLCHAINS=xcodedefault --show-toolchain-path" run_lib run_ours_lib --show-toolchain-path
+  # A name that is not installed is the default toolchain rather than an
+  # error, in the environment exactly as on the command line.
+  CMP_ENV=(TOOLCHAINS=bogusfoo)
+  prime_stable run_lib -v --find clang
+  cmp "TOOLCHAINS=bogusfoo -v --find clang" run_lib run_ours_lib -v --find clang
+  cmp "TOOLCHAINS=bogusfoo --show-toolchain-path" run_lib run_ours_lib --show-toolchain-path
+  # ...and the bundle-id spelling, which reaches the cache under its own key.
+  CMP_ENV=(TOOLCHAINS=com.apple.dt.toolchain.XcodeDefault)
+  prime_stable run_lib -v --find clang
+  cmp "TOOLCHAINS=bundle-id -v --find clang" run_lib run_ours_lib -v --find clang
+  cmp "TOOLCHAINS=bundle-id --show-toolchain-path" run_lib run_ours_lib --show-toolchain-path
+  # An empty variable is set and is not the same thing as an absent one, and
+  # both are the default toolchain.
+  CMP_ENV=(TOOLCHAINS=)
+  prime_stable run_lib -v --find clang
+  cmp "TOOLCHAINS='' -v --find clang" run_lib run_ours_lib -v --find clang
+  cmp "TOOLCHAINS='' --show-toolchain-path" run_lib run_ours_lib --show-toolchain-path
+  # --toolchain is the same question asked on the command line, and it wins:
+  # the trace prints the one that was written, whichever source it came from.
+  CMP_ENV=(TOOLCHAINS=bogusfoo)
+  prime_stable run_lib -v --toolchain XcodeDefault --find clang
+  cmp "TOOLCHAINS=bogusfoo --toolchain XcodeDefault -v --find clang" \
+    run_lib run_ours_lib -v --toolchain XcodeDefault --find clang
+  CMP_ENV=(TOOLCHAINS=XcodeDefault)
+  prime_stable run_lib -v --toolchain bogusfoo --find clang
+  cmp "TOOLCHAINS=XcodeDefault --toolchain bogusfoo -v --find clang" \
+    run_lib run_ours_lib -v --toolchain bogusfoo --find clang
+  # ...and it wins over an empty variable too, which is the row that tells
+  # "unset beats an empty option" apart from "the option always wins".
+  CMP_ENV=(TOOLCHAINS=)
+  prime_stable run_lib -v --toolchain XcodeDefault --find clang
+  cmp "TOOLCHAINS='' --toolchain XcodeDefault -v --find clang" \
+    run_lib run_ours_lib -v --toolchain XcodeDefault --find clang
+  CMP_ENV=()
+done
+
 # Every row above compares a warm Apple against ours, because the warm-up
-# above primes Apple's side first.  That is what makes them stable, and it is
-# also why they cannot see a lookup that reports where its answer came from:
-# Apple is never the cold side of the comparison, and ours reported a
-# database answer for every lookup whether or not the file had one.  Those two
-# facts are the same fact -- nothing in the file had to be true for ours to
-# say so -- and nothing in the rows above could have told.
+# above primes Apple's side first.  That is what makes them stable, and it
+# is also why they cannot see a lookup made with the cache bypassed: Apple
+# is never the cold side of the comparison, so nothing here can show what
+# either side does when the file is not there to answer from.  Warm rows
+# check that the note naming the file is printed when the file does hold the
+# key; they cannot check that it is absent when the key is missing, because
+# both sides are warm by construction.
 #
 # "Warm" here is a state prime_stable verified rather than one warm-up run
 # assumed, which it has to be: a single run leaves Apple's own cache in a state
