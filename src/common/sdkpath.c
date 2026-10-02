@@ -1025,15 +1025,16 @@ xt_toolchain_identifier(const char *tcpath)
 }
 
 /*
- * The build an SDK carries.
+ * A string out of the SystemVersion.plist an SDK ships.
  *
- * An SDK does not name its own build: the version it was cut from is
- * recorded in the SystemVersion.plist it ships, and that is the one
- * reported for the SDK, so it is read from there rather than invented
- * from the version number.
+ * Both the version and the build come from that one file: an SDK does not
+ * name its own version or the build it was cut from, and what it was cut
+ * from is recorded alongside it.  Reading the version out of
+ * SDKSettings.plist instead would answer from a copy of the settings, which
+ * is what makes a directory that merely holds a copy still not an SDK.
  */
-char *
-xt_sdk_build_version(const char *sdkpath)
+static char *
+sdk_system_version(const char *sdkpath, const char *key)
 {
 	char path[PATH_MAX];
 	CFDictionaryRef root;
@@ -1047,8 +1048,31 @@ xt_sdk_build_version(const char *sdkpath)
 	if ((root = cfplist_read(path)) == NULL)
 		return NULL;
 
-	value = cfplist_string(root, "ProductBuildVersion");
+	value = cfplist_string(root, key);
 	CFRelease(root);
 
 	return value;
+}
+
+/*
+ * The version an SDK carries.
+ */
+char *
+xt_sdk_version(const char *sdkpath)
+{
+	return sdk_system_version(sdkpath, "ProductVersion");
+}
+
+/*
+ * The build an SDK carries.
+ *
+ * An SDK does not name its own build: the version it was cut from is
+ * recorded in the SystemVersion.plist it ships, and that is the one
+ * reported for the SDK, so it is read from there rather than invented
+ * from the version number.
+ */
+char *
+xt_sdk_build_version(const char *sdkpath)
+{
+	return sdk_system_version(sdkpath, "ProductBuildVersion");
 }

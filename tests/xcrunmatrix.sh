@@ -57,6 +57,25 @@ CASES=(
   "--show-sdk-platform-path" "--show-sdk-platform-version"
   "--sdk bogusfoo --show-sdk-path" "--sdk macosx15.4 --show-sdk-version"
   "--sdk macosx26 --show-sdk-build-version"
+
+  # A path is an SDK by position rather than by name.  --show-sdk-path is
+  # told nothing about it and so answers with the spelling that was given,
+  # trailing slash and all, even for a path that is not an SDK or is not
+  # there; the other four read the path as an SDK and, failing, say why.
+  # The root is the one exception: "/" is not an SDK, so Apple drops it and
+  # carries on with the default, for these and for a tool lookup alike.
+  "--sdk /usr --show-sdk-path" "--sdk /usr/ --show-sdk-path"
+  "--sdk /nope --show-sdk-path" "--sdk /usr/bin/clang --show-sdk-path"
+  "--sdk / --show-sdk-path"
+  "--sdk /usr --show-sdk-version" "--sdk /usr/ --show-sdk-version"
+  "--sdk /usr --show-sdk-build-version"
+  "--sdk /usr --show-sdk-platform-path" "--sdk /usr/ --show-sdk-platform-path"
+  "--sdk /usr --show-sdk-platform-version"
+  "--sdk /usr/bin/clang --show-sdk-version"
+  "--sdk /nope --show-sdk-version" "--sdk /nope --show-sdk-build-version"
+  "--sdk /nope --show-sdk-platform-path" "--sdk /nope --show-sdk-platform-version"
+  "--sdk / --show-sdk-version" "--sdk / --show-sdk-build-version"
+  "--sdk / --show-sdk-platform-path" "--sdk / --show-sdk-platform-version"
   "--find clang" "--find ld" "--find cups-config" "--find definitely-not-a-tool"
   "--sdk macosx --find clang" "--sdk macosx15.4 --find clang"
   "--sdk macosx15.4 --find ld" "--sdk macosx15.4 --find cups-config"

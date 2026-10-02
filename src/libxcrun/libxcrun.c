@@ -198,6 +198,18 @@ static char *alternate_sdk_path = NULL;
 static char *alternate_toolchain_path = NULL;
 
 /*
+ * Why the SDK named by path could not be read, if it could not be.
+ *
+ * Held rather than said at the point it is found, because that is not the
+ * point it is said: a path is the SDK in effect whether or not it resolves,
+ * so it is a tool lookup that decides whether being unreadable matters, and
+ * an option that prints the path decides nothing at all.  Zero when the path
+ * was read, or when nothing is said about it because the flat layout has no
+ * toolchain to resolve one through.
+ */
+static int sdk_path_errno = 0;
+
+/*
  * The --toolchain argument as it was written.  TOOLCHAINS is that text
  * verbatim, and it is the only place the distinction survives: a short
  * name is stripped of its extension for searching, a path is turned
@@ -998,6 +1010,79 @@ static char *require_sdk_path(const char *name, const char *item)
 	}
 	fprintf(stderr, "xcrun: error: unable to lookup item '%s' in SDK '%s'\n", item, name);
 	exit(1);
+}
+
+/**
+ * @func path_sdk_has_settings -- whether a directory holds SDK settings at all
+ * @arg path - the directory, as it was written on the command line
+ * @return: 1 when the settings are there and readable, 0 when they are not
+ *
+ * An SDK named by path is asked whether it is one before it is asked what it
+ * says, and the first thing looked for is its settings: an SDK that does not
+ * have them cannot be asked anything.  Settings alone are not enough to be an
+ * SDK either, which is what the version is asked of the system itself and not
+ * of the settings -- so a directory holding a copy of a stock SDKSettings.plist
+ * still cannot answer with the SDK it was copied from.
+ */
+static int
+path_sdk_has_settings(const char *path)
+{
+	char settings[PATH_MAX];
+
+	snprintf(settings, sizeof(settings), "%s/SDKSettings.plist", path);
+
+	return access(settings, R_OK) == 0;
+}
+
+/**
+ * @func require_path_sdk_item -- report an item an SDK named by path cannot answer
+ * @arg path - the SDK, as it was written on the command line
+ * @arg item - the SDK item being asked for, named in the error
+ *
+ * An SDK named by path is consulted where it is, not looked up by name, so
+ * the two layouts say a miss differently and neither says what the other
+ * says.  Where toolchains are kept the miss is the toolchain's own doing and
+ * is told in its own terms, which is what require_sdk_path says for a name;
+ * the Command Line Tools keep no toolchain to ask, so they report the
+ * settings they could not read instead.
+ *
+ * The path is named as it was written rather than as anything it resolves
+ * to, because that is what Apple prints and a path that names no directory
+ * still has to be reportable -- /usr is not an SDK and is named /usr.
+ */
+static void require_path_sdk_item(const char *path, const char *item)
+{
+	if (devdir_has_toolchains())
+		(void)xcodebuild_sdk_query(path, item, 0);
+	else
+		fprintf(stderr, "xcrun: error: unable to read SDK settings for '%s'\n", path);
+
+	fprintf(stderr, "xcrun: error: unable to lookup item '%s' in SDK '%s'\n", item, path);
+	exit(1);
+}
+
+/**
+ * @func require_path_platform_item -- report a platform an SDK has none of
+ * @arg path - the SDK, as it was written on the command line
+ * @arg item - the SDK item being asked for, named in the error
+ *
+ * A platform is the one item a path is never asked about itself: the Command
+ * Line Tools keep their SDKs outside any platform bundle, so there is no
+ * platform to name, and that is what the first line says rather than
+ * complaining about the SDK.  The SDK is still named afterwards, which is the
+ * same second line a name gets, so a path that is not an SDK at all is
+ * reported in the same terms -- the platform is the first question asked and
+ * is answered before the SDK is.
+ */
+static void require_path_platform_item(const char *path, const char *item)
+{
+	if (!devdir_has_toolchains()) {
+		fprintf(stderr, "xcrun: error: unable to lookup item '%s' from command line tools installation\n", item);
+		fprintf(stderr, "xcrun: error: unable to lookup item '%s' in SDK '%s'\n", item, path);
+		exit(1);
+	}
+
+	require_path_sdk_item(path, item);
 }
 
 /**
@@ -2176,6 +2261,18 @@ static int request_command(const char *name, int argc, char *argv[])
 	 */
 	search_string[0] = '\0';
 
+	/*
+	 * A tool is what the SDK was named for, so this is where an SDK named
+	 * by a path that could not be read is said so.  Said once, however many
+	 * times a tool is looked up: the path is one path and has already been
+	 * refused, and the tools after it are looked up the same way.
+	 */
+	if (sdk_path_errno != 0) {
+		fprintf(stderr, "xcrun: error: Failed to determine realpath of '%s' (errno=%s)\n",
+		    alternate_sdk_path, strerror(sdk_path_errno));
+		sdk_path_errno = 0;
+	}
+
 	if (explicit_sdk_mode == 1) {
 		/*
 		 * The toolchain the SDK belongs to, and only that one.  An
@@ -2653,19 +2750,38 @@ static int xcrun_parse_args(int argc, char *argv[])
 							/* we support absolute paths and short names */
 								if (*sdk == '/') {
 									/*
-									 * A path is taken as the SDK it is
-									 * whether or not anything can be read
-									 * from it.  One that is not there is
-									 * said so where a toolchain would
-									 * have resolved it, which is where
-									 * the flat layout has nothing to
-									 * resolve through and stays quiet.
+									 * The root is the one path that
+									 * is not an SDK at all: Apple
+									 * resolves it to nothing and
+									 * carries on with the default,
+									 * for a tool lookup and for an
+									 * option that prints one alike.
+									 * It was still the argument that
+									 * was given, so it is still the
+									 * one consumed, but no SDK is in
+									 * effect because of it.
 									 */
-									if (validate_directory_path(sdk) == (-1) &&
-									    devdir_has_toolchains())
-										fprintf(stderr, "xcrun: error: Failed to determine realpath of '%s' (errno=%s)\n",
-										    sdk, strerror(errno));
-									alternate_sdk_path = sdk;
+									if (strcmp(sdk, "/") != 0) {
+										/*
+										 * A path is taken as the SDK it is
+										 * whether or not anything can be read
+										 * from it.  One that is not there is
+										 * said so where a toolchain would
+										 * have resolved it, which is where
+										 * the flat layout has nothing to
+										 * resolve through and stays quiet --
+										 * so this only notes that the path
+										 * could not be read, and leaves it to
+										 * the tool lookup to say so.  An
+										 * option that prints the path asks
+										 * nothing of it and is told nothing
+										 * about it.
+										 */
+										if (validate_directory_path(sdk) == (-1) &&
+										    devdir_has_toolchains())
+											sdk_path_errno = errno;
+										alternate_sdk_path = sdk;
+									}
 								} else {
 									/*
 									 * The name is kept as it was written, and
@@ -2881,16 +2997,69 @@ static int xcrun_parse_args(int argc, char *argv[])
 	 */
 	switch (show_kind) {
 		case SHOW_SDK_PATH:
+			/*
+			 * An SDK named by path is printed exactly as it was
+			 * written, including a trailing slash and including a
+			 * path that is not an SDK or is not there.  Apple
+			 * resolves this option against the toolchain and the
+			 * cache and reaches the same string, so asking
+			 * anything of it here would be a way of getting a
+			 * different answer; the path is the answer.
+			 */
+			if (alternate_sdk_path != NULL) {
+				verbose_manpath_note(alternate_sdk_path,
+				    alternate_sdk_path);
+				printf("%s\n", alternate_sdk_path);
+				exit(0);
+			}
 			printf("%s\n", require_sdk_path(current_sdk, "Path"));
 			exit(0);
 
-		case SHOW_SDK_VERSION:
-			/* Apple's xcrun prints the bare version and nothing else. */
-			printf("%s\n", get_sdk_info(require_sdk_path(current_sdk, "SDKVersion")).version);
+		case SHOW_SDK_VERSION: {
+			/*
+			 * Apple's xcrun prints the bare version and nothing else.
+			 * A path is read where it is rather than looked up by
+			 * name, so the version comes out of the system that
+			 * path ships and a directory that is not an SDK cannot
+			 * answer for one that is.
+			 */
+			char *version;
+
+			if (alternate_sdk_path != NULL) {
+				if (!path_sdk_has_settings(alternate_sdk_path))
+					require_path_sdk_item(alternate_sdk_path,
+					    "SDKVersion");
+				version = xt_sdk_version(alternate_sdk_path);
+				if (version == NULL)
+					require_path_sdk_item(alternate_sdk_path,
+					    "SDKVersion");
+				printf("%s\n", version);
+				free(version);
+				exit(0);
+			}
+			printf("%s\n", get_sdk_info(require_sdk_path(current_sdk,
+			    "SDKVersion")).version);
 			exit(0);
+		}
 
 		case SHOW_SDK_BUILD_VERSION: {
-			char *build = xt_sdk_build_version(require_sdk_path(current_sdk, "ProductBuildVersion"));
+			char *build;
+
+			if (alternate_sdk_path != NULL) {
+				if (!path_sdk_has_settings(alternate_sdk_path))
+					require_path_sdk_item(alternate_sdk_path,
+					    "ProductBuildVersion");
+				build = xt_sdk_build_version(alternate_sdk_path);
+				if (build == NULL)
+					require_path_sdk_item(alternate_sdk_path,
+					    "ProductBuildVersion");
+				printf("%s\n", build);
+				free(build);
+				exit(0);
+			}
+
+			build = xt_sdk_build_version(require_sdk_path(current_sdk,
+			    "ProductBuildVersion"));
 
 			if (build == NULL) {
 				fprintf(stderr, "xcrun: error: no build version for SDK '%s'.\n",
@@ -2903,8 +3072,26 @@ static int xcrun_parse_args(int argc, char *argv[])
 		}
 
 		case SHOW_SDK_PLATFORM_PATH: {
-			char *sdk = require_sdk_path(current_sdk, "PlatformPath");
-			char *platform = xt_sdk_platform_path(sdk);
+			char *sdk;
+			char *platform;
+
+			if (alternate_sdk_path != NULL) {
+				/*
+				 * The platform an SDK named by path belongs to is
+				 * found from where it is, which is a different
+				 * question from the one a name asks: nothing has
+				 * to resolve the name first.
+				 */
+				platform = xt_sdk_platform_path(alternate_sdk_path);
+				if (platform == NULL)
+					require_path_platform_item(alternate_sdk_path,
+					    "PlatformPath");
+				printf("%s\n", platform);
+				exit(0);
+			}
+
+			sdk = require_sdk_path(current_sdk, "PlatformPath");
+			platform = xt_sdk_platform_path(sdk);
 
 			if (platform == NULL) {
 				/*
@@ -2926,9 +3113,36 @@ static int xcrun_parse_args(int argc, char *argv[])
 		}
 
 		case SHOW_SDK_PLATFORM_VERSION: {
-			char *sdk = require_sdk_path(current_sdk, "PlatformVersion");
-			char *platform = xt_sdk_platform_path(sdk);
+			char *sdk;
+			char *platform;
 			char *version = NULL;
+
+			if (alternate_sdk_path != NULL) {
+				platform = xt_sdk_platform_path(alternate_sdk_path);
+				if (platform == NULL)
+					require_path_platform_item(alternate_sdk_path,
+					    "PlatformVersion");
+
+				/*
+				 * Apple's platform records the same version under
+				 * "Version" and CFBundleShortVersionString; take
+				 * the one that names itself, and accept the bundle
+				 * key from a platform that carries only that.
+				 */
+				if ((version = xt_platform_setting(platform, "Version")) == NULL)
+					version = xt_platform_setting(platform,
+					    "CFBundleShortVersionString");
+				if (version == NULL)
+					require_path_platform_item(alternate_sdk_path,
+					    "PlatformVersion");
+
+				printf("%s\n", version);
+				free(version);
+				exit(0);
+			}
+
+			sdk = require_sdk_path(current_sdk, "PlatformVersion");
+			platform = xt_sdk_platform_path(sdk);
 
 			if (platform != NULL) {
 				/*

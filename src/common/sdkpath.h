@@ -51,6 +51,18 @@ char *xt_sdk_platform_path(const char *sdkpath);
 char *xt_sdk_build_version(const char *sdkpath);
 
 /**
+ * @func xt_sdk_version -- read the version an SDK carries
+ * @arg sdkpath - absolute path of the .sdk directory
+ * @return: malloc'd version, or NULL when the SDK ships none
+ *
+ * Read from the SystemVersion.plist the SDK ships rather than from
+ * SDKSettings.plist, which is the same file Apple reads and for the same
+ * reason: the settings can be copied anywhere, and a directory that holds
+ * a copy is still not an SDK.
+ */
+char *xt_sdk_version(const char *sdkpath);
+
+/**
  * @func xt_platform_setting -- read a top-level string from a platform's Info.plist
  * @arg platformpath - absolute path of the .platform directory
  * @arg key - key to read, e.g. "Version"
