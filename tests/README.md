@@ -11,11 +11,11 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 394/394  the wide argument sweep plus the shipped
+  xcrunmatrix.sh 408/408  the wide argument sweep plus the shipped
               xcrun binary's DEVELOPER_DIR edges: Apple xcrun vs
               build/release/libxcrun.dylib through the driver, and vs
               build/release/xcrun where the dev dir is the variable;
-              376 warm rows and 18 cold-cache rows, every case matching
+              390 warm rows and 18 cold-cache rows, every case matching
               Apple's transcript; run via `make -C tests matrix`, not check
 
 The first four are `make -C tests check`; the last is `make -C tests
@@ -92,8 +92,8 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The wider xcrunmatrix.sh (394 rows, `make -C tests matrix`) matches
-Apple on all 394, on both the Xcode.app and the CommandLineTools
+The wider xcrunmatrix.sh (408 rows, `make -C tests matrix`) matches
+Apple on all 408, on both the Xcode.app and the CommandLineTools
 layouts.  The three check suites pass 100%.  Getting there took a few
 things worth knowing, since each is easy to get backwards:
 
@@ -200,16 +200,24 @@ things worth knowing, since each is easy to get backwards:
     after the loop that passes its arguments as written, so the empty one
     is passed as an empty one.
 
-  * A row belongs here only once it matches.  Two cases that this work
-    found are still different from Apple and are recorded in
-    local/xcselect.md rather than committed here, because a matrix whose
-    every row passes is the thing that makes a failure mean something.
-    Naming an empty tool for a lookup (`-f ''`) is one of them: Apple
-    answers it from the toolchain's own directory under a full Xcode and
-    reports the name it cannot find under the CommandLineTools, and ours
-    answers the other way round in each.  The other is a run of a tool
-    named rather than named by path under -v, which reports one trace
-    line less than Apple does.
+  * A row belongs here only once it matches.  Two cases that earlier work
+    found are recorded in local/xcselect.md rather than committed here,
+    because a matrix whose every row passes is the thing that makes a
+    failure mean something.  Both have since been closed and are rows now:
+    naming an empty tool for a lookup (`-f ''`), which Apple answers from
+    the toolchain's own directory under a full Xcode and reports as an
+    unplaceable name under the CommandLineTools, and a run of a tool named
+    rather than named by path under -v, which reported one trace line less
+    than Apple does.  The empty name is worth spelling out because the
+    answer depends on two mistakes that cancel each other's usual sign:
+    the toolchain is asked for it through a shell command built by hand, so
+    the empty word had to be written as '' and the surrounding sh -c had
+    to stop being a second quoting layer, and the flat walk matches
+    "directory" + "/" + "" so a directory satisfies access(X_OK) unless it
+    is required to be a regular file.  Apple also shell-escapes the name
+    wherever it writes it -- an empty one as '', anything a shell would read
+    as something else backslash-escaped -- and a wider set than a shell
+    needs, so `xcrun --find "it's"` reports `it\'s`.
 
   * A toolchain name is compared the way Apple compares it, which is
     without regard to case, and the answer is spelled the way the disk

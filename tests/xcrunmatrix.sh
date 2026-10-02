@@ -155,6 +155,11 @@ CASES=(
   "-v --sdk macosx --find clang" "-v --sdk macosx --no-cache --find clang"
   "-v --toolchain XcodeDefault --find clang"
   "-v --find /usr/bin/true" "-v /usr/bin/true"
+  # A bare tool that is run is looked up the way a find is, and its trace
+  # says where the answer came from: warm, the file names it; on a bypassed
+  # or cleared cache under a toolchain layout the answer is xcodebuild's and
+  # the trace says so.  These catch a run that resolved the tool silently.
+  "-v clang" "-v -n clang" "-v -k clang"
   "-v --kill-cache --find clang" "-v --kill-cache --find nosuchtool"
   "-v --sdk bogusfoo --find clang"
 
@@ -358,14 +363,18 @@ for d in "$X" "$C"; do
   cmp "--sdk '' --find clang" run_lib run_ours_lib --sdk "" --find clang
   cmp "--toolchain '' --find clang" run_lib run_ours_lib --toolchain "" --find clang
   cmp "--toolchain '' --show-toolchain-path" run_lib run_ours_lib --toolchain "" --show-toolchain-path
-  # "-f ''" is not here.  An empty name is a name for the purposes of a
-  # find, which is the row below, but naming one for a lookup is a case
-  # this unit did not touch: Apple answers it from the toolchain's own
-  # directory under a full Xcode and reports the name it cannot find under
-  # the command line tools, and ours answers the other way round in each.
-  # That difference predates the work here and is recorded in
-  # local/xcselect.md; a row that cannot pass yet does not belong in a
-  # matrix whose every row is supposed to match.
+  # An empty name is a name, so a find for one is answered rather than
+  # refused.  Where the toolchain keeps toolchains it places the name --
+  # the directory it would have searched is the answer -- and a flat layout
+  # has nothing that does, so the name it could not place is reported.  The
+  # name is reported the way the shipped library writes it, which for an
+  # empty one is a pair of quotes, and it reaches xcodebuild the same way,
+  # which is what lets the toolchain answer it at all.
+  prime_stable run_lib -f ""
+  cmp "-f ''" run_lib run_ours_lib -f ""
+  cmp "-v -f ''" run_lib run_ours_lib -v -f ""
+  cmp "-v -n -f ''" run_lib run_ours_lib -v -n -f ""
+  cmp "-v -k -f ''" run_lib run_ours_lib -v -k -f ""
   cmp "-f '' --find clang" run_lib run_ours_lib -f "" --find clang
 done
 

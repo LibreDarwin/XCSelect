@@ -471,10 +471,68 @@ static char *named_path(const char *name)
 	return path;
 }
 
+/**
+ * @func shell_char_is_literal -- whether a shell reads a byte as itself
+ * @arg c - the byte of a utility name
+ *
+ * The set is the one the shipped library leaves untouched when it writes a
+ * name into the xcodebuild command and into the message a failed lookup
+ * prints.  Everything else is escaped with a backslash.
+ */
+static int shell_char_is_literal(unsigned char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	    (c >= '0' && c <= '9') || c == '_' || c == '+' || c == '.' ||
+	    c == ',' || c == '-';
+}
+
+/**
+ * @func shell_quote -- the name as the shipped library writes it on a line
+ * @arg name - the utility name as the caller wrote it
+ * @return: malloc'd quoted name, or NULL
+ *
+ * The name is put into the xcodebuild command as one word of a shell line,
+ * and the same spelling is what the failure message reports, so the two
+ * agree on a name a shell would otherwise read as something else.  An
+ * empty name would vanish from the line altogether, so it is written as
+ * two quotes that a shell reads as one empty word; that is also what makes
+ * "xcrun --find ''" ask the toolchain for the directory it names.
+ */
+static char *shell_quote(const char *name)
+{
+	size_t len = 1;
+	const char *p;
+	char *out, *q;
+
+	if (*name == '\0')
+		return strdup("''");
+
+	for (p = name; *p != '\0'; p++)
+		len += shell_char_is_literal((unsigned char)*p) ? 1 : 2;
+
+	if ((out = malloc(len)) == NULL)
+		return NULL;
+
+	q = out;
+	for (p = name; *p != '\0'; p++) {
+		unsigned char c = (unsigned char)*p;
+
+		if (!shell_char_is_literal(c))
+			*q++ = '\\';
+		*q++ = (char)c;
+	}
+	*q = '\0';
+
+	return out;
+}
+
 static void no_such_utility(const char *name)
 {
+	char *quoted = shell_quote(name);
+
 	fprintf(stderr, "%s: error: unable to find utility \"%s\", not a developer tool or in PATH\n",
-	    progname, name);
+	    progname, quoted != NULL ? quoted : name);
+	free(quoted);
 	exit(EX_OSFILE);
 }
 
@@ -1486,6 +1544,28 @@ static void verbose_note(const char *fmt, ...)
 	fputc('\n', stderr);
 }
 
+/**
+ * @func verbose_warning -- a warning that belongs to the -v trace
+ * @arg fmt - what the warning says
+ *
+ * Same shape as a note but the word a reader greps for on a bad cache
+ * answer, which the shipped library reports as a warning rather than as a
+ * note of the lookup that was made.
+ */
+static void verbose_warning(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (verbose_mode != 1)
+		return;
+
+	fprintf(stderr, "%s: warning: ", progname);
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fputc('\n', stderr);
+}
+
 /* The manual page lookup is made once per run and named once per run. */
 static int verbose_manpath_reported = 0;
 
@@ -1997,9 +2077,19 @@ static char *search_command(const char *name, char *dirs)
 		/* Construct our program's absolute path. */
 		snprintf(cmd, PATH_MAX - 1, "%s/%s", absl_path, name);
 
-		/* Does it exist? Is it an executable? */
-		if (access(cmd, (F_OK | X_OK)) != (-1))
-			return cmd;
+		/*
+		 * Does it exist, and is it an executable?  A directory is
+		 * not one, though it may be searchable: an empty name
+		 * concatenated onto a directory spells that directory, and
+		 * the shipped library does not take a directory for a tool.
+		 */
+		{
+			struct stat st;
+
+			if (stat(cmd, &st) == 0 && S_ISREG(st.st_mode) &&
+			    access(cmd, X_OK) != (-1))
+				return cmd;
+		}
 
 		/* If not, move onto the next entry.. */
 		absl_path = strtok(NULL, delimiter);
@@ -2091,7 +2181,7 @@ static char *xcodebuild_find_path(const char *name)
 	char *xcodebuild = NULL;
 	char *sdk = NULL;
 	char *cmd = NULL;
-	char *shcmd = NULL;
+	char *quoted = NULL;
 	char *line = NULL;
 	char *path = NULL;
 	size_t linecap = 0;
@@ -2130,19 +2220,26 @@ static char *xcodebuild_find_path(const char *name)
 			return NULL;
 		}
 	}
-	if (asprintf(&cmd, "%s -sdk %s -find %s 2> /dev/null", xcodebuild, sdk, name) == -1) {
+	if ((quoted = shell_quote(name)) == NULL) {
+		free(sdk);
+		free(xcodebuild);
+		return NULL;
+	}
+	if (asprintf(&cmd, "%s -sdk %s -find %s 2> /dev/null", xcodebuild, sdk, quoted) == -1) {
+		free(quoted);
 		free(sdk);
 		free(xcodebuild);
 		return NULL;
 	}
 
-	/* The message quotes the whole thing, so keep the two apart. */
-	if (asprintf(&shcmd, "sh -c '%s'", cmd) == -1) {
-		free(cmd);
-		free(sdk);
-		free(xcodebuild);
-		return NULL;
-	}
+	/*
+	 * The command is reported inside an "sh -c '...'" of its own, which
+	 * is how the shipped library names it, but it is that text and not a
+	 * second layer of quoting: popen runs the line through a shell
+	 * already, and wrapping it again would eat the empty word that an
+	 * empty name is written as.
+	 */
+	free(quoted);
 
 	/*
 	 * Reported as 0 unless something here sets it, which is what the
@@ -2153,7 +2250,7 @@ static char *xcodebuild_find_path(const char *name)
 	 */
 	errno = validate_directory_path(sdk) == (-1) ? ENOENT : 0;
 
-	if ((fp = popen(shcmd, "r")) != NULL) {
+	if ((fp = popen(cmd, "r")) != NULL) {
 		ssize_t len = getline(&line, &linecap, fp);
 		int cstatus = pclose(fp);
 
@@ -2184,8 +2281,26 @@ static char *xcodebuild_find_path(const char *name)
 		}
 		if (path != NULL) {
 			char db[PATH_MAX];
+			struct stat st;
 
-			if (tool_lookup_warm_f == 1 &&
+			/*
+			 * A warm file whose answer is a directory has not
+			 * answered anything usable, and the shipped library
+			 * says so before it asks the toolchain the question
+			 * the directory could not settle.  The one name a
+			 * directory answers for is the empty one, and once
+			 * the complaint is made the trace reads as if the
+			 * file had held no answer at all.
+			 */
+			if (tool_lookup_warm_f == 1 && stat(path, &st) == 0 &&
+			    S_ISDIR(st.st_mode)) {
+				if (cache_db_path(db, sizeof(db)) != NULL)
+					verbose_note("lookup resolved in '%s' : '%s'",
+					    db, path);
+				verbose_warning("cache result '%s' does not exist or isn't executable", path);
+				verbose_note("looking up with '%s'", cmd);
+				verbose_note("lookup resolved with 'xcodebuild -find' to '%s'", path);
+			} else if (tool_lookup_warm_f == 1 &&
 			    cache_db_path(db, sizeof(db)) != NULL)
 				verbose_note("lookup resolved in '%s' : '%s'",
 				    db, path);
@@ -2212,7 +2327,6 @@ static char *xcodebuild_find_path(const char *name)
 	}
 
 	free(line);
-	free(shcmd);
 	free(cmd);
 	free(sdk);
 	free(xcodebuild);
@@ -2387,14 +2501,28 @@ static int request_command(const char *name, int argc, char *argv[])
 	 * but checked, which is a different question the file is not asked;
 	 * those keep the searches above and say nothing about the cache.
 	 */
-	if (finding_mode == 1 && strchr(name, '/') == NULL) {
+	if (strchr(name, '/') == NULL) {
 		char *sdk = sdk_path_or_null(current_sdk);
 
 		tool_lookup_warm_f = cache_db_has_tool_key(name,
 		    sdk != NULL ? sdk : current_sdk);
 		free(sdk);
 
-		if (devdir_has_toolchains())
+		/*
+		 * A find under a toolchain layout always leaves the answer to
+		 * the toolchain, but a tool that is being run is answered by
+		 * the walk below when the file already knows where it is: the
+		 * search string reaches the toolchain's own usr/bin, and the
+		 * shipped library reads the answer out of the file rather than
+		 * ask again.  A run the file has no answer for -- a cold file,
+		 * --no-cache, or a just-cleared one -- is sent to the same
+		 * toolchain a find is, which is where the "looking up with"
+		 * note comes from.  A flat layout has no toolchain to send it
+		 * to, so it walks in either case and says so only when the
+		 * file held the answer.
+		 */
+		if (devdir_has_toolchains() &&
+		    (finding_mode == 1 || tool_lookup_warm_f == 0))
 			return -1;
 	} else {
 		tool_lookup_warm_f = 0;
