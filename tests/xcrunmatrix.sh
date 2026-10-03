@@ -388,6 +388,49 @@ for d in "$X" "$C"; do
   cmp "-f '' --find clang" run_lib run_ours_lib -f "" --find clang
 done
 
+# A tool name has to survive being written into a shell command, because
+# that is how the toolchain is asked for one it cannot place: the answer to
+# a name nothing has is two lines, and both of them write the name out --
+# the command that was run, and "unable to find utility <name>".  Apple
+# escapes the name in both, and by a rule wider than a shell needs.
+#
+# The set is everything except [A-Za-z0-9_+.,-]: space, tab, and every one
+# of ' " \ $ ` ; & | < > ( ) * ? [ ] { } ! # ~ : % ^ = @ is written with a
+# backslash in front of it.  The members that are *not* shell
+# metacharacters are the interesting half of that list, since a reasonable
+# reading of "escape it for the shell" would leave them alone and Apple does
+# not: ':', '%', '^', '=', '@', '~', '#' and '!' are escaped too, and the
+# rows below are what says so.  One row for each, both because a row per
+# character is the only way to pin a set and because each of them is a
+# different failure if the escape is missing -- a space splits the argument,
+# a ' ends the quoting, a ; runs a second command, a $ expands.
+#
+# These cannot be CASES entries for the same reason the empty operands
+# cannot: a name with a space in it is not a word the loop would produce.
+#
+# The labels are written with printf %q, and are the *shell's* idea of
+# quoting rather than Apple's: %q leaves ~, #, :, %, = and @ alone, which is
+# correct for a shell and is exactly what Apple does not do.  So a label
+# reading "-f a~b" is not a claim that the row expects a~b back -- it is the
+# name, made legible.  %q is here so that a name with a tab or a quote in it
+# is readable at all, not because it is the answer.
+echo "=== a name a shell would read as something else ==="
+SHELL_NAMES=(
+  'a_b+c.d,e-f'          # the unescaped set, all of it at once
+  'a b' 'a;b' 'a|b' 'a&b' 'a>b' 'a<b' 'a(b)' 'a[b]' 'a{b}'
+  "it's" 'a"b' 'a\b' 'a$b' 'a`b' 'a*b' 'a?b' 'a~b' 'a#b' 'a!b'
+  'a:b' 'a%b' 'a^b' 'a=b' 'a@b'
+  $'a\tb'
+)
+for d in "$X" "$C"; do
+  devd=$d
+  for n in "${SHELL_NAMES[@]}"; do
+    label=$(printf -- '-f %q' "$n")
+    prime_stable run_lib -f "$n"
+    cmp "$label" run_lib run_ours_lib -f "$n"
+  done
+done
+
 # TOOLCHAINS, which names a toolchain without naming it on the command line.
 # It was verified by hand for as long as it existed and had no row, because
 # every runner above called its command with no environment of its own and an

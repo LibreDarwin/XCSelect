@@ -11,11 +11,11 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 432/432  the wide argument sweep plus the shipped
+  xcrunmatrix.sh 484/484  the wide argument sweep plus the shipped
               xcrun binary's DEVELOPER_DIR edges: Apple xcrun vs
               build/release/libxcrun.dylib through the driver, and vs
               build/release/xcrun where the dev dir is the variable;
-              414 warm rows and 18 cold-cache rows, every case matching
+              466 warm rows and 18 cold-cache rows, every case matching
               Apple's transcript; run via `make -C tests matrix`, not check
 
 The first four are `make -C tests check`; the last is `make -C tests
@@ -92,8 +92,8 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The wider xcrunmatrix.sh (432 rows, `make -C tests matrix`) matches
-Apple on all 432, on both the Xcode.app and the CommandLineTools
+The wider xcrunmatrix.sh (484 rows, `make -C tests matrix`) matches
+Apple on all 484, on both the Xcode.app and the CommandLineTools
 layouts.  The three check suites pass 100%.  Getting there took a few
 things worth knowing, since each is easy to get backwards:
 
@@ -215,7 +215,23 @@ things worth knowing, since each is easy to get backwards:
     it arrives as "--sdk --show-sdk-path", a different question that the
     list already asks.  The empty-operand rows are a separate section
     after the loop that passes its arguments as written, so the empty one
-    is passed as an empty one.
+    is passed as an empty one.  The same holds for a tool name that is not
+    a word -- "--find 'a b'" -- which is why the shell-quoting rows are a
+    section of their own rather than entries here.
+
+  * A tool name reaches a shell command when the toolchain has to be asked
+    for one it cannot place, and both of the lines that answer that write
+    the name out: the command, and `unable to find utility <name>`.  Apple
+    escapes it in both, by a rule wider than a shell needs -- everything
+    outside `[A-Za-z0-9_+.,-]` gets a backslash, including `:`, `%`, `^`,
+    `=`, `@`, `~`, `#` and `!`, which a shell would have passed through
+    alone.  There is a row per character, because a set cannot be pinned any
+    other way and because each one fails differently when its escape is
+    missing: a space splits the argument, a `'` ends the quoting, a `;`
+    runs a second command, a `$` expands.  One row carries the whole
+    unescaped set at once.  Read the labels as the shell's quoting, not
+    Apple's -- they come from `printf %q`, which leaves `~` and `#` alone
+    and is wrong in exactly the way these rows say Apple is not.
 
   * A row belongs here only once it matches.  Two cases that earlier work
     found are recorded in local/xcselect.md rather than committed here,
