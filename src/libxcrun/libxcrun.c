@@ -2190,10 +2190,19 @@ static char *sdk_toolchain_name(const char *sdkpath)
  * looked up as one.  Nothing is trimmed off either end: the answer is not
  * ours to shorten, and the spelling of a path that is already resolved
  * needs none.
+ *
+ * An empty value is not an answer, so it is the same as not having set one:
+ * "SDKROOT=" is how a shell spells "no SDK", and the shipped library falls
+ * back to the default rather than looking for an SDK whose name is nothing.
+ * That is the same rule as an empty --sdk, which names no SDK and so does
+ * not turn the default off either.
  */
 static char *sdk_from_environment(const char *value)
 {
-	return (value != NULL) ? strdup(value) : default_sdk_name();
+	if (value != NULL && *value != '\0')
+		return strdup(value);
+
+	return default_sdk_name();
 }
 
 static int request_command(const char *name, int argc, char *argv[]);

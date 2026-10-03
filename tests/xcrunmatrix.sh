@@ -544,7 +544,34 @@ for d in "$X" "$C"; do
   prime_stable run_lib -v --toolchain XcodeDefault --find clang
   cmp "TOOLCHAINS='' --toolchain XcodeDefault -v --find clang" \
     run_lib run_ours_lib -v --toolchain XcodeDefault --find clang
-  CMP_ENV=()
+CMP_ENV=()
+
+# An empty SDKROOT, which is how a shell spells "no SDK".  Apple reads it as
+# no answer and falls back to the default, the same rule as an empty --sdk
+# above, and the rows here are the same answer with the value coming from
+# somewhere other than the command line.
+#
+# This one earned its rows by producing output nothing else here could: an
+# SDK whose name is nothing reaches `xcodebuild -sdk  -version Path`, where
+# the shell drops the empty word so that -sdk takes -version as its value,
+# xcodebuild prints a listing of the SDKs it knows and exits 0, and that
+# listing was taken for the SDK path.  So SDKROOT= --show-sdk-path printed
+# "DriverKit25.5.sdk - DriverKit 25.5 (driverkit25.5)" with an sh syntax
+# error beside it, on a machine with a perfectly good default SDK.
+echo "=== an empty SDKROOT ==="
+for d in "$X" "$C"; do
+  devd=$d
+  CMP_ENV=(SDKROOT=)
+  prime_stable run_lib --show-sdk-path
+  CMP_ENV=(SDKROOT=) cmp "SDKROOT= --show-sdk-path" run_lib run_ours_lib --show-sdk-path
+  CMP_ENV=(SDKROOT=) cmp "SDKROOT= --show-sdk-version" run_lib run_ours_lib --show-sdk-version
+  CMP_ENV=(SDKROOT=) cmp "SDKROOT= --show-sdk-build-version" run_lib run_ours_lib --show-sdk-build-version
+  CMP_ENV=(SDKROOT=) cmp "SDKROOT= --show-sdk-platform-path" run_lib run_ours_lib --show-sdk-platform-path
+  CMP_ENV=(SDKROOT=) cmp "SDKROOT= --show-sdk-platform-version" run_lib run_ours_lib --show-sdk-platform-version
+  CMP_ENV=(SDKROOT=) cmp "SDKROOT= --find clang" run_lib run_ours_lib --find clang
+done
+CMP_ENV=()
+
 done
 
 # Every row above compares a warm Apple against ours, because the warm-up
