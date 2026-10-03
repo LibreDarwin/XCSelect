@@ -2196,13 +2196,41 @@ static char *sdk_toolchain_name(const char *sdkpath)
  * back to the default rather than looking for an SDK whose name is nothing.
  * That is the same rule as an empty --sdk, which names no SDK and so does
  * not turn the default off either.
+ *
+ * A path is put in alternate_sdk_path rather than returned as a name, which
+ * is what --sdk does with the same spelling and where the rest of this file
+ * expects a path to be: the show options read it where it was written, and
+ * the four that look an item up in it report it as an SDK named by path.
+ * Left as a name it went to the name lookup instead and came back as "failed
+ * to retrieve sdk info from '/nope'. (errno=No such file or directory)",
+ * which is a different report from the one the same path earns through
+ * --sdk: "unable to read SDK settings for '/nope'".
+ *
+ * The root is the exception both spellings make: it is the one path that is
+ * not an SDK at all, and Apple resolves it to nothing and carries on with
+ * the default, for a path that arrived here as well as for one that arrived
+ * on the command line.
  */
 static char *sdk_from_environment(const char *value)
 {
-	if (value != NULL && *value != '\0')
-		return strdup(value);
+	if (value == NULL || *value == '\0')
+		return default_sdk_name();
 
-	return default_sdk_name();
+	/*
+	 * The root is not an SDK, so it names none and the default answers in
+	 * its place.  This is the exception --sdk makes at the same spelling,
+	 * and it has to happen before the path test below, or "/" would be
+	 * taken for an SDK named by path and reported as one that is missing.
+	 */
+	if (strcmp(value, "/") == 0)
+		return default_sdk_name();
+
+	if (*value == '/') {
+		alternate_sdk_path = strdup(value);
+		return strdup(value);
+	}
+
+	return strdup(value);
 }
 
 static int request_command(const char *name, int argc, char *argv[]);
@@ -3201,6 +3229,40 @@ static int xcrun_parse_args(int argc, char *argv[])
 			 * different answer; the path is the answer.
 			 */
 			if (alternate_sdk_path != NULL) {
+				/*
+				 * The path is printed exactly as it was
+				 * written, trailing slash and all, whether or
+				 * not it is there -- that string is the
+				 * answer, so asking anything further of it
+				 * here would be a way of getting a different
+				 * one.  The exit status is the answer either
+				 * way, since no SDK was needed to print it.
+				 *
+				 * One report belongs to the first run of a path
+				 * and not to the ones after, and which run is
+				 * first is not ours to choose: Apple keys the
+				 * SDK by the path however it was named, so
+				 * "--sdk /p" and "SDKROOT=/p --show-sdk-path"
+				 * in the same second share one entry, and
+				 * whichever goes first reports.  Emitting it
+				 * when the cache does not know the path yet
+				 * matches that for both spellings -- a second
+				 * run of either asks nothing and fails
+				 * nothing.  The settings are one directory
+				 * below, and the path is joined rather than
+				 * concatenated, so a trailing slash does not
+				 * double.
+				 */
+				if (devdir_has_toolchains() &&
+				    !cache_db_has_key(alternate_sdk_path) &&
+				    !path_sdk_has_settings(alternate_sdk_path)) {
+					size_t len = strlen(alternate_sdk_path);
+
+					fprintf(stderr, "xcrun: error: Failed to open property list '%s%sSDKSettings.plist'\n",
+					    alternate_sdk_path,
+					    (len > 0 &&
+					    alternate_sdk_path[len - 1] == '/') ? "" : "/");
+				}
 				verbose_manpath_note(alternate_sdk_path,
 				    alternate_sdk_path);
 				printf("%s\n", alternate_sdk_path);
