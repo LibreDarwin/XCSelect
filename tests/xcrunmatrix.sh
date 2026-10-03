@@ -431,6 +431,54 @@ for d in "$X" "$C"; do
   done
 done
 
+# An SDK is put into a shell line by the same two commands, so it has to
+# survive the same way -- and the set it is given is *not* the set a tool
+# name is given.  A separator is the one difference, and it is the one that
+# matters here: an SDK is very often a path, and Apple writes
+# "-sdk /nonexistent/SDK" with the separators left alone while it escapes
+# every other byte a shell would read as something else.  Escaping the
+# separator here would be "safer" and wrong, and the 'a/b' row is what says
+# so -- it is the row that fails if the two sets are made one.
+#
+# A name is not the only way an SDK arrives, so the rows below also carry a
+# hostile SDKROOT.  The environment is the more interesting of the two,
+# because nothing on the command line has to be typed for it to arrive:
+# SDKROOT is read by every lookup in the process, which is how a build that
+# inherited it runs a command that was never written down.
+echo "=== an SDK a shell would read as something else ==="
+SDK_NAMES=(
+  'a_b+c.d,e-f/g'        # the unescaped set and the separator, all at once
+  'a b' 'a;b' 'a|b' 'a&b' 'a>b' 'a<b' 'a(b)' 'a[b]' 'a{b}'
+  "it's" 'a"b' 'a\b' 'a$b' 'a`b' 'a*b' 'a?b' 'a~b' 'a#b' 'a!b'
+  'a:b' 'a%b' 'a^b' 'a=b' 'a@b'
+  $'a\tb'
+)
+for d in "$X" "$C"; do
+  devd=$d
+  for n in "${SDK_NAMES[@]}"; do
+    label=$(printf -- '--sdk %q' "$n")
+    # A find, and not a --show-*: the SDK cannot be located, and the line
+    # that carries the escaping is the "sh -c '<command>'" one that reports
+    # the lookup failing.  A --show-* on a name that is not an SDK would
+    # compare a trace Apple has cached against one of ours that is not,
+    # which is the difference the -v rows avoid by staying off bad names --
+    # see the note above the CASES loop.
+    prime_stable run_lib --sdk "$n" --find clang
+    cmp "$label" run_lib run_ours_lib --sdk "$n" --find clang
+  done
+  for n in "${SDK_NAMES[@]}"; do
+    label=$(printf -- 'SDKROOT=%q' "$n")
+    # The same escaping for an SDK that arrived in the environment, which is
+    # the one that needs no --sdk to be hostile and so is the one a caller
+    # did not write.  Each value is part of the cache key, so each row is
+    # primed with the variable set, the way the TOOLCHAINS rows are.
+    CMP_ENV=("SDKROOT=$n")
+    prime_stable run_lib --find clang
+    CMP_ENV=("SDKROOT=$n") cmp "$label" run_lib run_ours_lib --find clang
+  done
+done
+CMP_ENV=()
+
 # TOOLCHAINS, which names a toolchain without naming it on the command line.
 # It was verified by hand for as long as it existed and had no row, because
 # every runner above called its command with no environment of its own and an

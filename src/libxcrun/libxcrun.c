@@ -487,6 +487,45 @@ static int shell_char_is_literal(unsigned char c)
 }
 
 /**
+ * @func quote_shell_word -- one word of a shell line, escaped in place
+ * @arg word - the value as the caller wrote it
+ * @arg keep_slash - whether a separator is left for the shell to read
+ * @return: malloc'd quoted word, or NULL
+ *
+ * The body both of this file's quoting functions share: everything a shell
+ * would read as anything but itself is escaped, and an empty word is
+ * written as the two quotes that stand for one empty word.
+ */
+static char *quote_shell_word(const char *word, int keep_slash)
+{
+	size_t len = 1;
+	const char *p;
+	char *out, *q;
+
+	if (*word == '\0')
+		return strdup("''");
+
+	for (p = word; *p != '\0'; p++)
+		len += (shell_char_is_literal((unsigned char)*p) ||
+		    (keep_slash && *p == '/')) ? 1 : 2;
+
+	if ((out = malloc(len)) == NULL)
+		return NULL;
+
+	q = out;
+	for (p = word; *p != '\0'; p++) {
+		unsigned char c = (unsigned char)*p;
+
+		if (!shell_char_is_literal(c) && !(keep_slash && c == '/'))
+			*q++ = '\\';
+		*q++ = (char)c;
+	}
+	*q = '\0';
+
+	return out;
+}
+
+/**
  * @func shell_quote -- the name as the shipped library writes it on a line
  * @arg name - the utility name as the caller wrote it
  * @return: malloc'd quoted name, or NULL
@@ -497,33 +536,30 @@ static int shell_char_is_literal(unsigned char c)
  * empty name would vanish from the line altogether, so it is written as
  * two quotes that a shell reads as one empty word; that is also what makes
  * "xcrun --find ''" ask the toolchain for the directory it names.
+ *
+ * A separator is escaped here, because a utility name is one word and a
+ * separator in it would split it into two.
  */
 static char *shell_quote(const char *name)
 {
-	size_t len = 1;
-	const char *p;
-	char *out, *q;
+	return quote_shell_word(name, 0);
+}
 
-	if (*name == '\0')
-		return strdup("''");
-
-	for (p = name; *p != '\0'; p++)
-		len += shell_char_is_literal((unsigned char)*p) ? 1 : 2;
-
-	if ((out = malloc(len)) == NULL)
-		return NULL;
-
-	q = out;
-	for (p = name; *p != '\0'; p++) {
-		unsigned char c = (unsigned char)*p;
-
-		if (!shell_char_is_literal(c))
-			*q++ = '\\';
-		*q++ = (char)c;
-	}
-	*q = '\0';
-
-	return out;
+/**
+ * @func shell_quote_sdk -- the SDK as the shipped library writes it on a line
+ * @arg arg - the SDK name or path as the caller wrote it
+ * @return: malloc'd quoted SDK, or NULL
+ *
+ * The same escaping as a utility name, except that a separator is left
+ * alone: the shipped library writes "-sdk /usr/bin/xcodebuild -sdk
+ * /nonexistent/SDK..." with the path as it was given, and escapes every
+ * other byte a shell would read as something else -- a space, a dollar, a
+ * parenthesis -- so that "--sdk '$(id)'" reaches xcodebuild as the name of
+ * an SDK rather than as a command to run.
+ */
+static char *shell_quote_sdk(const char *arg)
+{
+	return quote_shell_word(arg, 1);
 }
 
 static void no_such_utility(const char *name)
@@ -1704,6 +1740,7 @@ static char *xcodebuild_sdk_query(const char *arg, const char *query, int voice)
 {
 	char *xcodebuild = NULL;
 	char *cmd = NULL;
+	char *quoted = NULL;
 	char *line = NULL;
 	size_t linecap = 0;
 	FILE *fp;
@@ -1726,10 +1763,19 @@ static char *xcodebuild_sdk_query(const char *arg, const char *query, int voice)
 		return NULL;
 	}
 
-	if (asprintf(&cmd, "%s -sdk %s -version %s", xcodebuild, arg, query) == -1) {
+	if ((quoted = shell_quote_sdk(arg)) == NULL) {
 		free(xcodebuild);
 		return NULL;
 	}
+
+	if (asprintf(&cmd, "%s -sdk %s -version %s", xcodebuild, quoted,
+	    query) == -1) {
+		free(quoted);
+		free(xcodebuild);
+		return NULL;
+	}
+
+	free(quoted);
 
 	if (voice) {
 		verbose_note("looking up SDK with '%s'", cmd);
@@ -2182,6 +2228,7 @@ static char *xcodebuild_find_path(const char *name)
 	char *sdk = NULL;
 	char *cmd = NULL;
 	char *quoted = NULL;
+	char *quoted_sdk = NULL;
 	char *line = NULL;
 	char *path = NULL;
 	size_t linecap = 0;
@@ -2225,12 +2272,22 @@ static char *xcodebuild_find_path(const char *name)
 		free(xcodebuild);
 		return NULL;
 	}
-	if (asprintf(&cmd, "%s -sdk %s -find %s 2> /dev/null", xcodebuild, sdk, quoted) == -1) {
+	if ((quoted_sdk = shell_quote_sdk(sdk)) == NULL) {
 		free(quoted);
 		free(sdk);
 		free(xcodebuild);
 		return NULL;
 	}
+	if (asprintf(&cmd, "%s -sdk %s -find %s 2> /dev/null", xcodebuild,
+	    quoted_sdk, quoted) == -1) {
+		free(quoted_sdk);
+		free(quoted);
+		free(sdk);
+		free(xcodebuild);
+		return NULL;
+	}
+
+	free(quoted_sdk);
 
 	/*
 	 * The command is reported inside an "sh -c '...'" of its own, which
