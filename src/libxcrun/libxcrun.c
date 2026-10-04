@@ -1129,6 +1129,41 @@ path_sdk_has_settings(const char *path)
 }
 
 /**
+ * @func report_path_sdk_settings -- report settings an SDK named by path has none of
+ * @arg path - the SDK, as it was written on the command line
+ *
+ * An SDK named by path is asked for a version and the settings are looked for
+ * first, and failing to find them is reported before anything else is said --
+ * once, and for every option that goes on to ask the SDK something.  The
+ * report belongs to the path rather than to the question, so it does not sit
+ * inside any one of them: --show-sdk-path made it, and the four options that
+ * ask the SDK a version or a platform did not, and Apple makes it for all
+ * five.
+ *
+ * Like the report for a *name* this one belongs to neither layout, so the
+ * layout is not asked.  Unlike it, this one is asked only while the cache does
+ * not know the path: the cache is keyed by path, both spellings of the operand
+ * share one entry, and the first run of a path is the one that reports.
+ *
+ * The settings are joined to the path rather than concatenated onto it, so a
+ * path written with a trailing slash does not double the separator.
+ */
+static void
+report_path_sdk_settings(const char *path)
+{
+	size_t len;
+
+	if (cache_db_has_key(path) || path_sdk_has_settings(path))
+		return;
+
+	len = strlen(path);
+
+	fprintf(stderr,
+	    "xcrun: error: Failed to open property list '%s%sSDKSettings.plist'\n",
+	    path, (len > 0 && path[len - 1] == '/') ? "" : "/");
+}
+
+/**
  * @func require_path_sdk_item -- report an item an SDK named by path cannot answer
  * @arg path - the SDK, as it was written on the command line
  * @arg item - the SDK item being asked for, named in the error
@@ -3260,15 +3295,7 @@ static int xcrun_parse_args(int argc, char *argv[])
 				 * lost it there.  That is a difference from
 				 * require_sdk_path, and deliberately so.
 				 */
-				if (!cache_db_has_key(alternate_sdk_path) &&
-				    !path_sdk_has_settings(alternate_sdk_path)) {
-					size_t len = strlen(alternate_sdk_path);
-
-					fprintf(stderr, "xcrun: error: Failed to open property list '%s%sSDKSettings.plist'\n",
-					    alternate_sdk_path,
-					    (len > 0 &&
-					    alternate_sdk_path[len - 1] == '/') ? "" : "/");
-				}
+				report_path_sdk_settings(alternate_sdk_path);
 				verbose_manpath_note(alternate_sdk_path,
 				    alternate_sdk_path);
 				printf("%s\n", alternate_sdk_path);
@@ -3288,6 +3315,7 @@ static int xcrun_parse_args(int argc, char *argv[])
 			char *version;
 
 			if (alternate_sdk_path != NULL) {
+				report_path_sdk_settings(alternate_sdk_path);
 				if (!path_sdk_has_settings(alternate_sdk_path))
 					require_path_sdk_item(alternate_sdk_path,
 					    "SDKVersion");
@@ -3308,6 +3336,7 @@ static int xcrun_parse_args(int argc, char *argv[])
 			char *build;
 
 			if (alternate_sdk_path != NULL) {
+				report_path_sdk_settings(alternate_sdk_path);
 				if (!path_sdk_has_settings(alternate_sdk_path))
 					require_path_sdk_item(alternate_sdk_path,
 					    "ProductBuildVersion");
@@ -3344,6 +3373,7 @@ static int xcrun_parse_args(int argc, char *argv[])
 				 * question from the one a name asks: nothing has
 				 * to resolve the name first.
 				 */
+				report_path_sdk_settings(alternate_sdk_path);
 				platform = xt_sdk_platform_path(alternate_sdk_path);
 				if (platform == NULL)
 					require_path_platform_item(alternate_sdk_path,
@@ -3380,6 +3410,7 @@ static int xcrun_parse_args(int argc, char *argv[])
 			char *version = NULL;
 
 			if (alternate_sdk_path != NULL) {
+				report_path_sdk_settings(alternate_sdk_path);
 				platform = xt_sdk_platform_path(alternate_sdk_path);
 				if (platform == NULL)
 					require_path_platform_item(alternate_sdk_path,

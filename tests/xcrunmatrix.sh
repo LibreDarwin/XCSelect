@@ -27,6 +27,31 @@ C=/Library/Developer/CommandLineTools
 ST=$(mktemp -d "${TMPDIR:-/tmp}/xcrunmatrix.XXXXXX") || exit 2
 trap 'rm -rf "$ST"' EXIT
 
+# The cache is the harness's own, so that what a row sees does not depend on
+# what this machine happened to ask for earlier today.  Left unset, every row
+# read and wrote /var/db/xcrun_db: rows answered from whatever the last run
+# of anything had left behind, and a row's result depended on the order the
+# rows ran in.  That is not a theory -- it is how a -v row came to pass only
+# when the database was already warm.  Apple's cold run of a resolved name
+# prints seventeen trace lines and its warm run prints two, so a warm row
+# whose priming had been disturbed is not a small difference but a different
+# transcript, and the matrix was comparing two of them by luck.
+#
+# This is a scratch file, and a matrix run begins cold and earns every row's
+# warmth through prime_stable, the same way a fresh machine would.  An
+# XCRUN_DB from the outside still wins, which is how a single row can be run
+# against a database prepared for it.
+#
+# Emptied with the shipped -k rather than by truncating: a zero-length file is
+# not a cold cache but an absence of one, and Apple reads the two differently.
+# Asked about /tmp against a file truncated to nothing it printed no report at
+# all, and asked the same question after its own -k it printed one -- so
+# priming this file by truncation would leave every row below reporting nothing
+# and quietly compare two silent runs.
+export XCRUN_DB=${XCRUN_DB:-$ST/xcrun_db}
+: > "$XCRUN_DB"
+env XCRUN_DB="$XCRUN_DB" DEVELOPER_DIR="$X" /usr/bin/xcrun -k >/dev/null 2>&1
+
 is_text() { [ "$(LC_ALL=C tr -cd '\000' < "$1" | wc -c | tr -d ' ')" -eq 0 ]; }
 
 # The bundle name is ResultBundle_<date>_<time>-<subsecond>.xcresult, and the
@@ -644,6 +669,35 @@ for d in "$X" "$C"; do
     devd=$d
     cmp "cold|$c" run_lib run_ours_lib "$@"
   done
+
+  # The same report from the four options that ask the SDK something, which
+  # is where it went missing: it belongs to the path, not to the question, so
+  # --show-sdk-path made it and the four that ask a version or a platform did
+  # not, and Apple makes it for all five.  A path that exists and is not an
+  # SDK (/tmp) as well as one that does not exist at all (/cold-absent), since
+  # the report is about the settings being unreadable rather than about the
+  # directory being missing.
+  CMP_SUBS='s#/cold-sdk-[ab]#PATH#g'
+  for opt in --show-sdk-version --show-sdk-build-version \
+             --show-sdk-platform-path --show-sdk-platform-version; do
+    for p in /cold-sdk-a /cold-sdk-b; do
+      devd=$d
+      cmp "cold|--sdk $p $opt" run_lib run_ours_lib --sdk "$p" "$opt"
+    done
+  done
+  # /tmp is a directory that exists and holds no SDKSettings.plist, and
+  # /cold-absent is not there at all.  Both report the settings, and the
+  # question each of the four asks then fails the same way, so the rows differ
+  # only in which directory was named.
+  CMP_SUBS='s#/cold-absent#PATH#g'
+  for opt in --show-sdk-version --show-sdk-build-version \
+             --show-sdk-platform-path --show-sdk-platform-version; do
+    devd=$d
+    cmp "cold|--sdk /cold-absent $opt" run_lib run_ours_lib --sdk /cold-absent "$opt"
+    devd=$d
+    cmp "cold|--sdk /tmp $opt" run_lib run_ours_lib --sdk /tmp "$opt"
+  done
+  unset CMP_SUBS
 
   # The same report through the environment rather than the command line.
   # Which spelling was used is not the question -- Apple keys the SDK by the

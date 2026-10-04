@@ -11,11 +11,11 @@ Current results (default fixtures, Apple macOS build):
   libxsmatrix.sh 36/36  /usr/lib/libxcselect.dylib vs build/release/libxcselect.dylib
   ivkmatrix.sh   39/39  invoke_xcrun, Apple lib vs ours, real tools downstream
   sandbox.sh     14/14  -s and -r against a scratch tree, read back off disk
-  xcrunmatrix.sh 624/624  the wide argument sweep plus the shipped
+  xcrunmatrix.sh 656/656  the wide argument sweep plus the shipped
               xcrun binary's DEVELOPER_DIR edges: Apple xcrun vs
               build/release/libxcrun.dylib through the driver, and vs
               build/release/xcrun where the dev dir is the variable;
-              594 warm rows and 30 cold-cache rows, every case matching
+              594 warm rows and 62 cold-cache rows, every case matching
               Apple's transcript; run via `make -C tests matrix`, not check
 
 The first four are `make -C tests check`; the last is `make -C tests
@@ -92,8 +92,8 @@ against a missing/odd layout as well as a real one:
              fixture root for a difftool-style review; refresh it by
              re-copying the source, no commit involved.
 
-The wider xcrunmatrix.sh (624 rows, `make -C tests matrix`) matches
-Apple on all 624, on both the Xcode.app and the CommandLineTools
+The wider xcrunmatrix.sh (656 rows, `make -C tests matrix`) matches
+Apple on all 656, on both the Xcode.app and the CommandLineTools
 layouts.  The three check suites pass 100%.  Getting there took a few
 things worth knowing, since each is easy to get backwards:
 
@@ -162,7 +162,7 @@ things worth knowing, since each is easy to get backwards:
     was unreachable -- every one of its rows still passed with it
     disabled -- so it was deleted rather than left in as dead code.
 
-  * The 30 cold rows are the ones that say where an answer came from.
+  * The 62 cold rows are the ones that say where an answer came from.
     Ours -k does not empty the file: the shipped -k rewrites it, which
     means writing Apple's private XR1L framing, and ours sets the flag
     that stops it reporting a cached answer but leaves the file alone.
@@ -170,6 +170,19 @@ things worth knowing, since each is easy to get backwards:
     side, since a row emptied by ours would hand the second side a warm
     file and quietly stop being cold.  That divergence is recorded in
     local/xcselect.md rather than papered over here.
+
+  * The matrix runs against its own XCRUN_DB, under $TMPDIR and removed
+    with the rest of the scratch, because /var/db/xcrun_db is a machine's
+    history rather than a test fixture: left unset, every row read and
+    wrote it, and a row's answer depended on which rows had run before it.
+    That is not a theory.  A -v row was passing only because an earlier row
+    had warmed it -- Apple's cold run of a resolved name prints seventeen
+    trace lines and its warm run prints two, so the row had been comparing
+    two warm transcripts by luck.  Priming that file is done with the
+    shipped -k and not by truncating it, which is the distinction the whole
+    cold section rests on: a zero-length file is not a cold cache but the
+    absence of one, and asked about /tmp against a truncated file Apple
+    printed no report at all, and after its own -k printed one.
 
   * A warm row has to be warm for a reason the harness checked, because
     ours never writes the file and so is warm by construction: any state
