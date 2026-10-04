@@ -1107,6 +1107,107 @@ static char *require_sdk_path(const char *name, const char *item)
 }
 
 /**
+ * @func path_sdk_settings_path -- where the settings of an SDK named by path are
+ * @arg path - the directory, as it was written on the command line
+ * @arg buf - where the settings path is written
+ * @arg size - the size of buf
+ *
+ * The settings are looked for under the directory itself rather than under
+ * the directory spelled out, and the difference is visible in the report that
+ * names them: asked about "/usr/../usr" Apple says '/usr/SDKSettings.plist'
+ * while naming the SDK '/usr/../usr' everywhere else -- the toolchain is
+ * handed the original and fails in those terms, and only the file it went to
+ * look in has been tidied.
+ *
+ * That tidying is lexical, not a resolution: "/tmp/../tmp" is asked about as
+ * "/tmp", not as "/private/tmp", so symlinks are not followed and a name that
+ * does not exist still collapses ("/nope/../nope" is "/nope").  Interior "."
+ * and ".." are resolved, trailing slashes go, and the leading run of them is
+ * left alone -- "//usr" is "//usr", which is what Apple does and not what a
+ * collapse would make it.
+ *
+ * The one thing this does not reproduce is a path made of nothing but
+ * slashes: Apple shortens those by one rather than resolving them ("//" reads
+ * as "/" and "///" as "//"), which looks like an artifact of doing it a
+ * component at a time rather than a rule worth having.
+ */
+static void
+path_sdk_settings_path(const char *path, char *buf, size_t size)
+{
+	const char *p = path;
+	char *out = buf;
+	char *base;
+	size_t left = size;
+	int wrote = 0;
+
+	/*
+	 * The run of slashes a path opens with is part of how it was written
+	 * and is kept: "//usr" is looked for as "//usr".  Only the interior
+	 * and the trailing are noise.  base is where the components begin,
+	 * because a ".." may not eat the leading run.
+	 */
+	while (*p == '/') {
+		if (left > 1) {
+			*out++ = '/';
+			left--;
+		}
+		p++;
+	}
+	base = out;
+
+	while (*p != '\0') {
+		const char *seg;
+		size_t seglen;
+
+		while (*p == '/')
+			p++;
+		if (*p == '\0')
+			break;
+
+		seg = p;
+		while (*p != '\0' && *p != '/')
+			p++;
+		seglen = (size_t)(p - seg);
+
+		if (seglen == 1 && seg[0] == '.')
+			continue;
+
+		if (seglen == 2 && seg[0] == '.' && seg[1] == '.') {
+			/*
+			 * A ".." that has a component to remove removes it, and
+			 * one that has not is dropped: there is nothing above the
+			 * leading run to go to, so "/usr/.." is "/" rather than an
+			 * error.  That is what Apple does with the root spelled
+			 * this way.
+			 */
+			if (wrote) {
+				while (out > base && out[-1] != '/')
+					out--;
+				if (out > base)
+					out--;	/* the separator, too */
+				wrote = 0;
+			}
+			continue;
+		}
+
+		if (wrote && left > 1)
+			*out++ = '/';
+		left--;
+		if (left > seglen)
+			memcpy(out, seg, seglen);
+		out += seglen;
+		left -= seglen;
+		wrote = 1;
+	}
+
+	if (out >= buf + size)
+		out = buf + size - 1;
+	*out = '\0';
+
+	snprintf(buf + strlen(buf), size - strlen(buf), "/SDKSettings.plist");
+}
+
+/**
  * @func path_sdk_has_settings -- whether a directory holds SDK settings at all
  * @arg path - the directory, as it was written on the command line
  * @return: 1 when the settings are there and readable, 0 when they are not
@@ -1123,7 +1224,7 @@ path_sdk_has_settings(const char *path)
 {
 	char settings[PATH_MAX];
 
-	snprintf(settings, sizeof(settings), "%s/SDKSettings.plist", path);
+	path_sdk_settings_path(path, settings, sizeof(settings));
 
 	return access(settings, R_OK) == 0;
 }
@@ -1151,16 +1252,15 @@ path_sdk_has_settings(const char *path)
 static void
 report_path_sdk_settings(const char *path)
 {
-	size_t len;
+	char settings[PATH_MAX];
 
 	if (cache_db_has_key(path) || path_sdk_has_settings(path))
 		return;
 
-	len = strlen(path);
+	path_sdk_settings_path(path, settings, sizeof(settings));
 
-	fprintf(stderr,
-	    "xcrun: error: Failed to open property list '%s%sSDKSettings.plist'\n",
-	    path, (len > 0 && path[len - 1] == '/') ? "" : "/");
+	fprintf(stderr, "xcrun: error: Failed to open property list '%s'\n",
+	    settings);
 }
 
 /**
