@@ -3252,9 +3252,15 @@ static int xcrun_parse_args(int argc, char *argv[])
 				 * below, and the path is joined rather than
 				 * concatenated, so a trailing slash does not
 				 * double.
+				 *
+				 * Unlike the report for a *name*, this one is
+				 * not the toolchain's doing, so the layout is
+				 * not asked: a flat installation reports it
+				 * too, and gating on devdir_has_toolchains()
+				 * lost it there.  That is a difference from
+				 * require_sdk_path, and deliberately so.
 				 */
-				if (devdir_has_toolchains() &&
-				    !cache_db_has_key(alternate_sdk_path) &&
+				if (!cache_db_has_key(alternate_sdk_path) &&
 				    !path_sdk_has_settings(alternate_sdk_path)) {
 					size_t len = strlen(alternate_sdk_path);
 

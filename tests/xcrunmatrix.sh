@@ -267,6 +267,17 @@ cmp() {
   "$orun" "$@" >"$ST/o.out" 2>"$ST/o.err" <"$inf"; local or_=$?
   norm "$ST/a.out" > "$ST/a.out.n"; norm "$ST/o.out" > "$ST/o.out.n"
   norm "$ST/a.err" > "$ST/a.err.n"; norm "$ST/o.err" > "$ST/o.err.n"
+  # CMP_SUBS is a sed script applied to both sides after norm, so a row can
+  # ask two spellings of the same question -- two paths, two variable
+  # values -- and compare the answers rather than the spellings.  It has to
+  # be applied in here rather than by piping cmp through sed: cmp increments
+  # the totals that decide the exit status, and a pipe puts it in a subshell
+  # where those increments are lost, so a DIFF in a piped row is printed and
+  # not counted.
+  if [ -n "${CMP_SUBS:-}" ]; then
+    rtk sed -E "$CMP_SUBS" -i '' "$ST/a.out.n" "$ST/o.out.n" \
+        "$ST/a.err.n" "$ST/o.err.n"
+  fi
   total=$((total+1))
   if [ "$ar" = "$or_" ] && diff -q "$ST/a.out.n" "$ST/o.out.n" >/dev/null \
      && diff -q "$ST/a.err.n" "$ST/o.err.n" >/dev/null; then
@@ -607,6 +618,48 @@ for d in "$X" "$C"; do
     devd=$d
     cmp "$c" run_lib run_ours_lib "$@"
   done
+
+  # --show-sdk-path on an SDK named by path, cold, in both spellings.
+  #
+  # Every row above is a tool lookup, and the report this option makes is
+  # about an SDK rather than a tool, so the cold section did not reach it:
+  # asked for the first time, this option says that the SDKSettings.plist
+  # under the path could not be opened, and asked again it does not.  The
+  # path is printed either way and the exit status is the same, so the
+  # difference is one line on stderr and it is only visible here.
+  #
+  # Each side gets a path of its own -- /cold-sdk-a and /cold-sdk-b -- which
+  # are the same question asked twice, because the cache is keyed by path and
+  # a path one side has asked about is warm for the other.  norm() hides the
+  # difference in the label; the substitution below hides it in the answer.
+  #
+  # This is also why CMP_COLD is what makes the row possible at all: it
+  # empties the file before each side, so neither run can be warm because of
+  # the other, and the fact that ours never writes a key -- it only reads --
+  # cannot make the second run warm either.  Both start from nothing.
+  CMP_SUBS='s#/cold-sdk-[ab]#PATH#g'
+  for c in "--sdk /cold-sdk-a --show-sdk-path" "--sdk /cold-sdk-b --show-sdk-path"; do
+    # shellcheck disable=SC2086
+    set -- $c
+    devd=$d
+    cmp "cold|$c" run_lib run_ours_lib "$@"
+  done
+
+  # The same report through the environment rather than the command line.
+  # Which spelling was used is not the question -- Apple keys the SDK by the
+  # path however it was named, so these two share one entry and whichever
+  # goes first reports -- but the SDKROOT side has no word to put in the CASES
+  # loop, so it is asked here the way the empty-SDKROOT rows are.
+  CMP_SUBS='s#/cold-root-[0-9]+-[ab]#PATH#g'
+  for i in 1 2; do
+    devd=$d
+    CMP_ENV=(SDKROOT="/cold-root-$i-a") cmp "cold|SDKROOT=/cold-root-$i-a --show-sdk-path" \
+      run_lib run_ours_lib --show-sdk-path
+    devd=$d
+    CMP_ENV=(SDKROOT="/cold-root-$i-b") cmp "cold|SDKROOT=/cold-root-$i-b --show-sdk-path" \
+      run_lib run_ours_lib --show-sdk-path
+  done
+  CMP_ENV=(); unset CMP_SUBS
 done
 unset CMP_COLD
 
